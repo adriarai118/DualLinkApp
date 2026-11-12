@@ -7,7 +7,10 @@ android {
     namespace = "com.duallink.downloader"
     compileSdk = 34
     // CI: use the NDK preinstalled on the runner instead of downloading one.
-    System.getenv("ANDROID_NDK_LATEST_HOME")?.takeIf { it.isNotBlank() }?.let { ndkPath = it }
+    System.getenv("ANDROID_NDK_LATEST_HOME")?.takeIf { it.isNotBlank() }?.let {
+        ndkPath = it
+        ndkVersion = File(it).name // directory is named after the version, e.g. 30.0.16248370
+    }
 
     defaultConfig {
         applicationId = "com.duallink.downloader"
