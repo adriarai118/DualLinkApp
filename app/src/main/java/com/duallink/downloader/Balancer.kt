@@ -41,7 +41,7 @@ class VpnLink(val name: String, private val provider: () -> Network?) {
 
     companion object {
         const val MIN_CAPACITY = 300.0 * 1024 // bytes/s
-        const val MIN_SHARE = 0.35
+        const val MIN_SHARE = 0.5
     }
 }
 
@@ -104,11 +104,14 @@ class Balancer(val links: List<VpnLink>, private val countsActive: Boolean = tru
         link.recentFails.set(0)
     }
 
-    /** Three failures in a row => avoid the link for 15 s (e.g. mobile data with no internet). */
+    /**
+     * Three link-level failures in a row => avoid the link for 10 s
+     * (e.g. mobile data switched on but with no internet).
+     */
     fun reportFailure(link: VpnLink) {
         link.failures.incrementAndGet()
         if (link.recentFails.incrementAndGet() >= 3) {
-            link.badUntil = SystemClock.elapsedRealtime() + 15_000
+            link.badUntil = SystemClock.elapsedRealtime() + 10_000
             link.recentFails.set(0)
         }
     }
@@ -119,6 +122,7 @@ class Balancer(val links: List<VpnLink>, private val countsActive: Boolean = tru
      */
     fun connect(host: String, port: Int, isName: Boolean): Pair<VpnLink, Socket> {
         var last: Exception? = null
+        val failed = ArrayList<VpnLink>(2)
         for (link in order(host)) {
             val net = link.network ?: continue
             try {
@@ -129,6 +133,9 @@ class Balancer(val links: List<VpnLink>, private val countsActive: Boolean = tru
                         s.connect(InetSocketAddress(a, port), CONNECT_TIMEOUT_MS)
                         s.tcpNoDelay = true
                         reportSuccess(link)
+                        // Only blame a link when the other one reached the same place:
+                        // a site that is down or filtered fails on both and is nobody's fault.
+                        failed.forEach { reportFailure(it) }
                         return link to s
                     } catch (e: IOException) {
                         last = e
@@ -138,7 +145,7 @@ class Balancer(val links: List<VpnLink>, private val countsActive: Boolean = tru
             } catch (e: Exception) {
                 last = e
             }
-            reportFailure(link)
+            failed += link
         }
         throw IOException("no link could connect to $host:$port", last)
     }

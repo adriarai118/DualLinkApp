@@ -88,17 +88,34 @@ class AggregatorVpnService : VpnService() {
                 return START_NOT_STICKY
             }
             ACTION_CONNECT -> {
-                if (tun == null) connect(intent.getBooleanExtra(EX_STICKY, false))
+                if (tun == null) connectAsync(intent.getBooleanExtra(EX_STICKY, false))
                 else VpnState.balancer?.sticky = intent.getBooleanExtra(EX_STICKY, false)
             }
             else -> {
                 // Started by the system, e.g. "Always-on VPN" after a reboot.
-                if (tun == null) connect(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("sticky", false))
+                if (tun == null) connectAsync(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("sticky", false))
             }
         }
         return START_STICKY
     }
 
+    @Volatile private var connecting = false
+
+    /** Connecting waits for networks and does DNS, so it must not run on the main thread. */
+    private fun connectAsync(sticky: Boolean) {
+        if (connecting) return
+        connecting = true
+        VpnState.message = "در حال روشن شدن… (منتظر وای‌فای و دیتا)"
+        Thread({
+            try {
+                connect(sticky)
+            } finally {
+                connecting = false
+            }
+        }, "vpn-connect").start()
+    }
+
+    @Synchronized
     private fun connect(sticky: Boolean) {
         try {
             val prefs = getSharedPreferences("settings", MODE_PRIVATE)
@@ -113,13 +130,25 @@ class AggregatorVpnService : VpnService() {
                 VpnLink("داده همراه") { lm.cell },
             ), countsActive = !proxyMode).also { it.sticky = sticky }
 
+            waitForLinks(lm)
+
             val socksPort: Int
             val udpMode: String
             if (parsed != null) {
                 socksPort = ServerSocket(0).use { it.localPort }
-                xraybridge.Xraybridge.setProtector(LinkProtector(balancer))
+                // Resolve the server here (Android's resolver works; Go's doesn't on Android).
+                val serverIp = resolveServer(lm, parsed.host)
+                val dns = (lm.dnsServers(lm.wifi) + lm.dnsServers(lm.cell))
+                    .filterIsInstance<java.net.Inet4Address>().mapNotNull { it.hostAddress }
+                xraybridge.Xraybridge.setProtector(LinkProtector(balancer) { ip ->
+                    when {
+                        lm.dnsServers(lm.wifi).any { it.hostAddress == ip } -> balancer.links[0]
+                        lm.dnsServers(lm.cell).any { it.hostAddress == ip } -> balancer.links[1]
+                        else -> null
+                    }
+                })
                 xraybridge.Xraybridge.start(
-                    ProxyConfig.buildConfig(parsed, socksPort, prefs.getBoolean(PREF_DIRECT_IR, true))
+                    ProxyConfig.buildConfig(parsed, socksPort, prefs.getBoolean(PREF_DIRECT_IR, true), serverIp, dns)
                 )
                 xrayRunning = true
                 udpMode = "udp" // Xray's socks inbound speaks standard UDP ASSOCIATE
@@ -190,6 +219,31 @@ class AggregatorVpnService : VpnService() {
         }
     }
 
+    /** Mobile data needs a few seconds to come up next to Wi-Fi; don't start without it. */
+    private fun waitForLinks(lm: LinkManager) {
+        val deadline = System.currentTimeMillis() + 8000
+        while (System.currentTimeMillis() < deadline) {
+            if (lm.wifi != null && lm.cell != null) return
+            // Accept a single link after 4 s (the other may simply be off).
+            if (System.currentTimeMillis() > deadline - 4000 && (lm.wifi != null || lm.cell != null)) return
+            Thread.sleep(150)
+        }
+    }
+
+    /** Server name -> IPv4 address via whichever link works. Keeps the name if it already is an IP. */
+    private fun resolveServer(lm: LinkManager, host: String): String? {
+        if (host.all { it.isDigit() || it == '.' } || host.contains(':')) return null
+        for (net in listOfNotNull(lm.wifi, lm.cell)) {
+            try {
+                val all = net.getAllByName(host)
+                val v4 = all.firstOrNull { it is java.net.Inet4Address } ?: all.firstOrNull()
+                if (v4 != null) return v4.hostAddress
+            } catch (_: Exception) {
+            }
+        }
+        throw IllegalStateException("آدرس سرور کانفیگ ($host) پیدا نشد (DNS)")
+    }
+
     /**
      * In proxy mode Xray owns the sockets, so we can't count bytes per link ourselves.
      * Mobile bytes come from Android's counters; Wi-Fi = everything that reached the
@@ -229,6 +283,7 @@ class AggregatorVpnService : VpnService() {
         }
     }
 
+    @Synchronized
     private fun disconnect(msg: String) {
         handler.removeCallbacks(meter)
         try { TProxyService.TProxyStopService() } catch (_: Throwable) {}

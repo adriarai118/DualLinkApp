@@ -40,6 +40,10 @@ class LinkManager(context: Context) {
     val wifi: Network? get() = wifiSlot.network
     val cell: Network? get() = cellSlot.network
 
+    /** DNS servers the operator / router gave this network. */
+    fun dnsServers(network: Network?): List<java.net.InetAddress> =
+        network?.let { cm.getLinkProperties(it)?.dnsServers }.orEmpty()
+
     fun start(useWifi: Boolean, useCell: Boolean) {
         if (useWifi) request(wifiSlot)
         if (useCell) request(cellSlot)

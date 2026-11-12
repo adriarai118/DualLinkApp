@@ -28,7 +28,15 @@ object ProxyConfig {
         }
     }
 
-    fun buildConfig(p: Parsed, socksPort: Int, directIr: Boolean): String {
+    /**
+     * @param serverIp the server's address resolved on the Android side, or null to keep the name.
+     * @param dnsServers DNS servers for Xray itself (needed for direct .ir sites). Android has no
+     *   /etc/resolv.conf, so Xray's built-in resolver must be given servers explicitly.
+     */
+    fun buildConfig(p: Parsed, socksPort: Int, directIr: Boolean, serverIp: String?, dnsServers: List<String>): String {
+        val outbound = JSONObject(p.outbound.toString())
+        if (serverIp != null) outbound.getJSONObject("settings").put("address", serverIp)
+
         val inbound = JSONObject()
             .put("tag", "socks-in")
             .put("listen", "127.0.0.1")
@@ -43,12 +51,16 @@ object ProxyConfig {
                 .put("domain", JSONArray().put("regexp:\\.ir$"))
                 .put("outboundTag", "direct"))
         }
+        val servers = JSONArray()
+        (dnsServers + listOf("1.1.1.1", "8.8.8.8")).distinct().forEach { servers.put(it) }
         return JSONObject()
             .put("log", JSONObject().put("loglevel", "warning"))
+            .put("dns", JSONObject().put("servers", servers).put("queryStrategy", "UseIPv4"))
             .put("inbounds", JSONArray().put(inbound))
             .put("outbounds", JSONArray()
-                .put(p.outbound)
-                .put(JSONObject().put("tag", "direct").put("protocol", "freedom")))
+                .put(outbound)
+                .put(JSONObject().put("tag", "direct").put("protocol", "freedom")
+                    .put("settings", JSONObject().put("domainStrategy", "UseIPv4"))))
             .put("routing", JSONObject().put("domainStrategy", "AsIs").put("rules", rules))
             .toString()
     }
@@ -148,11 +160,11 @@ object ProxyConfig {
 
         val ss = JSONObject().put("network", network).put("security", security)
         when (network) {
-            "ws" -> ss.put("wsSettings", JSONObject().put("path", path.ifEmpty { "/" }).put("host", hostHeader))
-            "httpupgrade" -> ss.put("httpupgradeSettings", JSONObject().put("path", path.ifEmpty { "/" }).put("host", hostHeader))
+            "ws" -> ss.put("wsSettings", JSONObject().put("path", path.ifEmpty { "/" }).put("host", hostHeader.ifEmpty { sni ?: host }))
+            "httpupgrade" -> ss.put("httpupgradeSettings", JSONObject().put("path", path.ifEmpty { "/" }).put("host", hostHeader.ifEmpty { sni ?: host }))
             "xhttp" -> ss.put("xhttpSettings", JSONObject()
                 .put("path", path.ifEmpty { "/" })
-                .put("host", hostHeader)
+                .put("host", hostHeader.ifEmpty { sni ?: host })
                 .put("mode", q["mode"]?.ifEmpty { null } ?: "auto"))
             "grpc" -> ss.put("grpcSettings", JSONObject()
                 .put("serviceName", q["serviceName"].orEmpty())
