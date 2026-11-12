@@ -15,8 +15,6 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
-
       - name: Build debug APK
         run: |
           chmod +x gradlew
