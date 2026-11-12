@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,8 +22,17 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk DualLink.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: DualLink-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: DualLink.apk
+
+      - name: Publish to the "latest" release (direct download link)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest DualLink.apk --title "DualLink Downloader (latest build)" --notes "Built from ${GITHUB_SHA::7}"
