@@ -6,6 +6,8 @@ plugins {
 android {
     namespace = "com.duallink.downloader"
     compileSdk = 34
+    // CI: use the NDK preinstalled on the runner instead of downloading one.
+    System.getenv("ANDROID_NDK_LATEST_HOME")?.takeIf { it.isNotBlank() }?.let { ndkPath = it }
 
     defaultConfig {
         applicationId = "com.duallink.downloader"
