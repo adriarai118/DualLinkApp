@@ -22,6 +22,25 @@ object VpnState {
     @Volatile var socks: SocksServer? = null
     @Volatile var startedAt = 0L
     @Volatile var proxyName: String? = null
+    @Volatile var xrayLog: java.io.File? = null
+
+    /** Last few lines of Xray's error log, for showing on screen. */
+    fun xrayLogTail(maxLines: Int = 4): String {
+        val f = xrayLog ?: return ""
+        return try {
+            java.io.RandomAccessFile(f, "r").use { raf ->
+                val len = raf.length()
+                val start = maxOf(0L, len - 4096)
+                raf.seek(start)
+                val bytes = ByteArray((len - start).toInt())
+                raf.readFully(bytes)
+                String(bytes, Charsets.UTF_8).lines().filter { it.isNotBlank() }.takeLast(maxLines)
+                    .joinToString("\n") { it.substringAfter("] ", it).take(160) }
+            }
+        } catch (_: Exception) {
+            ""
+        }
+    }
 }
 
 /**
@@ -147,8 +166,10 @@ class AggregatorVpnService : VpnService() {
                         else -> null
                     }
                 })
+                val log = File(cacheDir, "xray.log").apply { writeText("") }
+                VpnState.xrayLog = log
                 xraybridge.Xraybridge.start(
-                    ProxyConfig.buildConfig(parsed, socksPort, prefs.getBoolean(PREF_DIRECT_IR, true), serverIp, dns)
+                    ProxyConfig.buildConfig(parsed, socksPort, prefs.getBoolean(PREF_DIRECT_IR, true), serverIp, dns, log.absolutePath)
                 )
                 xrayRunning = true
                 udpMode = "udp" // Xray's socks inbound speaks standard UDP ASSOCIATE

@@ -33,7 +33,7 @@ object ProxyConfig {
      * @param dnsServers DNS servers for Xray itself (needed for direct .ir sites). Android has no
      *   /etc/resolv.conf, so Xray's built-in resolver must be given servers explicitly.
      */
-    fun buildConfig(p: Parsed, socksPort: Int, directIr: Boolean, serverIp: String?, dnsServers: List<String>): String {
+    fun buildConfig(p: Parsed, socksPort: Int, directIr: Boolean, serverIp: String?, dnsServers: List<String>, logPath: String): String {
         val outbound = JSONObject(p.outbound.toString())
         if (serverIp != null) outbound.getJSONObject("settings").put("address", serverIp)
 
@@ -54,7 +54,7 @@ object ProxyConfig {
         val servers = JSONArray()
         (dnsServers + listOf("1.1.1.1", "8.8.8.8")).distinct().forEach { servers.put(it) }
         return JSONObject()
-            .put("log", JSONObject().put("loglevel", "warning"))
+            .put("log", JSONObject().put("loglevel", "warning").put("error", logPath).put("access", "none"))
             .put("dns", JSONObject().put("servers", servers).put("queryStrategy", "UseIPv4"))
             .put("inbounds", JSONArray().put(inbound))
             .put("outbounds", JSONArray()

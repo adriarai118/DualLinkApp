@@ -238,6 +238,10 @@ class MainActivity : Activity() {
                     .append("  —  مصرف: ").append(fmtBytes(l.down.get() + l.up.get()))
             }
         }
+        if (VpnState.running && VpnState.proxyName != null) {
+            val tail = VpnState.xrayLogTail()
+            if (tail.isNotEmpty()) sb.append("\n\nآخرین پیام‌های Xray:\n").append(tail)
+        }
         vpnText.text = sb.toString()
     }
 
