@@ -39,6 +39,13 @@ android {
         }
     }
 
+    // Store native libs compressed in the APK (much smaller download; unpacked on install).
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
