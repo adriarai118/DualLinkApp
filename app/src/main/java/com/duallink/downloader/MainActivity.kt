@@ -272,7 +272,7 @@ class MainActivity : Activity() {
         threadsLabel = TextView(this).apply { setPadding(0, dp(8), 0, 0) }
         root.addView(threadsLabel)
         threadsBar = SeekBar(this).apply {
-            max = 7 // 1..8
+            max = 31 // 1..32
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) = updateThreadsLabel()
                 override fun onStartTrackingTouch(s: SeekBar?) {}

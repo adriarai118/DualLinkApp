@@ -81,7 +81,7 @@ class DownloadService : Service() {
 
     private fun begin(intent: Intent) {
         val url = intent.getStringExtra(EX_URL).orEmpty()
-        val threads = intent.getIntExtra(EX_THREADS, 4).coerceIn(1, 16)
+        val threads = intent.getIntExtra(EX_THREADS, 4).coerceIn(1, 32)
         val useWifi = intent.getBooleanExtra(EX_WIFI, true)
         val useCell = intent.getBooleanExtra(EX_CELL, true)
 
