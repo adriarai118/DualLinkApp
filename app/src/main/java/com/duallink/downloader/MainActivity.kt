@@ -9,6 +9,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -28,6 +29,10 @@ import android.widget.Toast
 
 class MainActivity : Activity() {
 
+    companion object {
+        private const val REQ_VPN = 42
+    }
+
     private lateinit var urlInput: EditText
     private lateinit var wifiBox: CheckBox
     private lateinit var cellBox: CheckBox
@@ -38,6 +43,9 @@ class MainActivity : Activity() {
     private lateinit var progress: ProgressBar
     private lateinit var statusText: TextView
     private lateinit var linksText: TextView
+    private lateinit var vpnBtn: Button
+    private lateinit var stickyBox: CheckBox
+    private lateinit var vpnText: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private val refresher = object : Runnable {
@@ -56,6 +64,7 @@ class MainActivity : Activity() {
         wifiBox.isChecked = prefs.getBoolean("wifi", true)
         cellBox.isChecked = prefs.getBoolean("cell", true)
         threadsBar.progress = prefs.getInt("threads", 4) - 1
+        stickyBox.isChecked = prefs.getBoolean("sticky", false)
         updateThreadsLabel()
         if (urlInput.text.isEmpty()) urlInput.setText(prefs.getString("url", ""))
         handleShare(intent)
@@ -132,9 +141,63 @@ class MainActivity : Activity() {
         startService(Intent(this, DownloadService::class.java).setAction(DownloadService.ACTION_CANCEL))
     }
 
+    // ------------------------------------------------------------- VPN mode
+
+    private fun toggleVpn() {
+        if (VpnState.running) {
+            startService(Intent(this, AggregatorVpnService::class.java).setAction(AggregatorVpnService.ACTION_DISCONNECT))
+            return
+        }
+        val consent = VpnService.prepare(this)
+        if (consent != null) {
+            @Suppress("DEPRECATION")
+            startActivityForResult(consent, REQ_VPN)
+        } else {
+            startVpn()
+        }
+    }
+
+    private fun startVpn() {
+        VpnState.message = "در حال روشن شدن…"
+        startService(
+            Intent(this, AggregatorVpnService::class.java)
+                .setAction(AggregatorVpnService.ACTION_CONNECT)
+                .putExtra(AggregatorVpnService.EX_STICKY, stickyBox.isChecked)
+        )
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_VPN) {
+            if (resultCode == RESULT_OK) startVpn() else toast("اجازه VPN داده نشد")
+        }
+    }
+
+    private fun renderVpn() {
+        vpnBtn.text = if (VpnState.running) "خاموش کردن حالت کل گوشی" else "روشن کردن حالت کل گوشی"
+        val b = VpnState.balancer
+        val sb = StringBuilder("وضعیت: ").append(VpnState.message)
+        if (VpnState.running && b != null) {
+            sb.append("\nسرعت کل: ↓ ").append(fmtSpeed(b.links.sumOf { it.downBps }))
+                .append("   ↑ ").append(fmtSpeed(b.links.sumOf { it.upBps }))
+            for (l in b.links) {
+                val state = if (l.network == null) " (قطع)" else ""
+                sb.append("\n● ").append(l.name).append(state).append(":  ↓ ").append(fmtSpeed(l.downBps))
+                    .append("  ↑ ").append(fmtSpeed(l.upBps))
+                    .append("\n    اتصال فعال: ").append(l.active.get())
+                    .append("  —  مجموع: ").append(l.total.get())
+                    .append("  —  مصرف: ").append(fmtBytes(l.down.get() + l.up.get()))
+            }
+        }
+        vpnText.text = sb.toString()
+    }
+
     // -------------------------------------------------------------- render
 
     private fun render() {
+        renderVpn()
         val e = DlState.engine
         val running = DlState.running
         startBtn.isEnabled = !running
@@ -233,6 +296,41 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
 
+        root.addView(TextView(this).apply {
+            text = "حالت کل گوشی (VPN)"
+            textSize = 17f
+            setTypeface(typeface, Typeface.BOLD)
+        })
+        root.addView(TextView(this).apply {
+            text = "همه برنامه‌ها (مرورگر، پلی‌استور، اینستاگرام، تلگرام…) اتصال‌هایشان بین وای‌فای و دیتا پخش می‌شود. " +
+                "برنامه‌هایی که چند اتصال هم‌زمان باز می‌کنند بیشترین سود را می‌برند. هم‌زمان با VPN دیگری کار نمی‌کند."
+            textSize = 13f
+            setTextColor(Color.DKGRAY)
+        })
+        stickyBox = CheckBox(this).apply {
+            text = "حالت سازگار: هر سایت فقط از یک لینک (اگر بانک یا سایتی مدام از حساب خارج شد)"
+            setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean("sticky", checked).apply()
+                VpnState.balancer?.sticky = checked
+            }
+        }
+        root.addView(stickyBox)
+        vpnBtn = Button(this).apply { setOnClickListener { toggleVpn() } }
+        root.addView(vpnBtn)
+        vpnText = TextView(this).apply {
+            textSize = 14f
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        root.addView(vpnText)
+        root.addView(View(this).apply { setBackgroundColor(Color.LTGRAY) },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+
+        root.addView(TextView(this).apply {
+            text = "دانلودر تکه‌ای (یک فایل، حداکثر سرعت)"
+            textSize = 17f
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, dp(12), 0, dp(4))
+        })
         root.addView(TextView(this).apply {
             text = "لینک فایل:"
             textSize = 15f
