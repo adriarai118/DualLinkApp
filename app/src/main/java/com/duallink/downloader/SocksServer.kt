@@ -244,7 +244,7 @@ class SocksServer(private val balancer: Balancer) {
     }
 
     private fun pump(src: InputStream, dst: OutputStream, counter: AtomicLong) {
-        val buf = ByteArray(32 * 1024)
+        val buf = ByteArray(64 * 1024)
         while (true) {
             val n = src.read(buf)
             if (n < 0) return

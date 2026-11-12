@@ -11,8 +11,8 @@ android {
         applicationId = "com.duallink.downloader"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "3.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -48,6 +48,7 @@ android {
     }
 }
 
-// No external libraries: only the Android framework and the Kotlin stdlib.
 dependencies {
+    // Built in CI from xraybridge/ (Go, gomobile): Xray-core + per-socket link binding.
+    implementation(files("libs/xraybridge.aar"))
 }

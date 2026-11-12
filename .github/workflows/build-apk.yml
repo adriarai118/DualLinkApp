@@ -20,6 +20,38 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # ---- Xray bridge (Go -> Android AAR). Cached until xraybridge/ changes.
+      - name: Cache Xray bridge AAR
+        id: xray-cache
+        uses: actions/cache@v4
+        with:
+          path: app/libs/xraybridge.aar
+          key: xraybridge-v1-${{ hashFiles('xraybridge/**') }}
+
+      - name: Set up Go
+        if: steps.xray-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: xraybridge/go.mod
+          cache-dependency-path: xraybridge/go.sum
+
+      - name: Build Xray bridge AAR
+        if: steps.xray-cache.outputs.cache-hit != 'true'
+        working-directory: xraybridge
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          gomobile init
+          go mod tidy
+          mkdir -p ../app/libs
+          gomobile bind -v -target=android/arm64,android/arm -androidapi 24 -trimpath \
+            -ldflags='-s -w -buildid= -checklinkname=0' \
+            -o ../app/libs/xraybridge.aar .
+          ls -la ../app/libs
+
+      # ---- App
       - name: Build debug APK
         run: |
           chmod +x gradlew

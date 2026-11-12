@@ -46,6 +46,10 @@ class MainActivity : Activity() {
     private lateinit var vpnBtn: Button
     private lateinit var stickyBox: CheckBox
     private lateinit var vpnText: TextView
+    private lateinit var proxyBox: CheckBox
+    private lateinit var proxyInput: EditText
+    private lateinit var directIrBox: CheckBox
+    private lateinit var proxyInfo: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private val refresher = object : Runnable {
@@ -65,6 +69,14 @@ class MainActivity : Activity() {
         cellBox.isChecked = prefs.getBoolean("cell", true)
         threadsBar.progress = prefs.getInt("threads", 4) - 1
         stickyBox.isChecked = prefs.getBoolean("sticky", false)
+        // Read everything first: setting a checkbox fires its listener, which saves all fields.
+        val savedLink = prefs.getString(AggregatorVpnService.PREF_PROXY_LINK, "")
+        val savedProxyOn = prefs.getBoolean(AggregatorVpnService.PREF_PROXY_ON, false)
+        val savedDirectIr = prefs.getBoolean(AggregatorVpnService.PREF_DIRECT_IR, true)
+        proxyInput.setText(savedLink)
+        directIrBox.isChecked = savedDirectIr
+        proxyBox.isChecked = savedProxyOn
+        validateProxy()
         updateThreadsLabel()
         if (urlInput.text.isEmpty()) urlInput.setText(prefs.getString("url", ""))
         handleShare(intent)
@@ -157,7 +169,37 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun saveProxyPrefs() {
+        prefs.edit()
+            .putString(AggregatorVpnService.PREF_PROXY_LINK, proxyInput.text.toString().trim())
+            .putBoolean(AggregatorVpnService.PREF_PROXY_ON, proxyBox.isChecked)
+            .putBoolean(AggregatorVpnService.PREF_DIRECT_IR, directIrBox.isChecked)
+            .apply()
+    }
+
+    /** Shows what the pasted link is, or why it can't be used. Returns false if invalid. */
+    private fun validateProxy(): Boolean {
+        val link = proxyInput.text.toString().trim()
+        if (link.isEmpty()) {
+            proxyInfo.text = "لینک کانفیگ (vless / vmess / trojan / ss) را اینجا بچسبانید."
+            return !proxyBox.isChecked
+        }
+        return try {
+            val p = ProxyConfig.parse(link)
+            proxyInfo.text = "✓ ${p.name} — ${p.protocol} — ${p.host}:${p.port}"
+            true
+        } catch (e: Exception) {
+            proxyInfo.text = "✗ لینک نامعتبر: ${e.message}"
+            false
+        }
+    }
+
     private fun startVpn() {
+        if (proxyBox.isChecked && !validateProxy()) {
+            toast("لینک کانفیگ معتبر نیست")
+            return
+        }
+        saveProxyPrefs()
         VpnState.message = "در حال روشن شدن…"
         startService(
             Intent(this, AggregatorVpnService::class.java)
@@ -175,7 +217,12 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun hintReconnect() {
+        if (VpnState.running) toast("برای اعمال تغییر، حالت کل گوشی را خاموش و دوباره روشن کنید")
+    }
+
     private fun renderVpn() {
+        proxyInput.isEnabled = !VpnState.running
         vpnBtn.text = if (VpnState.running) "خاموش کردن حالت کل گوشی" else "روشن کردن حالت کل گوشی"
         val b = VpnState.balancer
         val sb = StringBuilder("وضعیت: ").append(VpnState.message)
@@ -315,6 +362,53 @@ class MainActivity : Activity() {
             }
         }
         root.addView(stickyBox)
+
+        proxyBox = CheckBox(this).apply {
+            text = "از طریق کانفیگ VPN (v2ray/xray) — تجمیع روی خود VPN"
+            setOnCheckedChangeListener { _, _ -> validateProxy(); saveProxyPrefs(); hintReconnect() }
+        }
+        root.addView(proxyBox)
+        val proxyRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        proxyInput = EditText(this).apply {
+            hint = "vless://…  یا  vmess://…  یا  trojan://…  یا  ss://…"
+            textDirection = View.TEXT_DIRECTION_LTR
+            textSize = 12f
+            maxLines = 3
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setOnFocusChangeListener { _, has -> if (!has) { validateProxy(); saveProxyPrefs() } }
+        }
+        proxyRow.addView(proxyInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        proxyRow.addView(Button(this).apply {
+            text = "چسباندن"
+            setOnClickListener {
+                val clip = getSystemService(ClipboardManager::class.java).primaryClip
+                val t = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this@MainActivity)?.toString()?.trim()
+                val line = t?.lineSequence()?.map { it.trim() }?.firstOrNull {
+                    it.startsWith("vless://") || it.startsWith("vmess://") || it.startsWith("trojan://") || it.startsWith("ss://")
+                }
+                if (line != null) {
+                    proxyInput.setText(line)
+                    proxyBox.isChecked = true
+                    validateProxy(); saveProxyPrefs(); hintReconnect()
+                } else {
+                    toast("لینک کانفیگ در کلیپ‌بورد نیست")
+                }
+            }
+        })
+        root.addView(proxyRow)
+        proxyInfo = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.DKGRAY)
+        }
+        root.addView(proxyInfo)
+        directIrBox = CheckBox(this).apply {
+            text = "سایت‌های ‎.ir‎ بدون کانفیگ (مستقیم، ولی باز هم تجمیع‌شده)"
+            setOnCheckedChangeListener { _, _ -> saveProxyPrefs(); hintReconnect() }
+        }
+        root.addView(directIrBox)
         vpnBtn = Button(this).apply { setOnClickListener { toggleVpn() } }
         root.addView(vpnBtn)
         vpnText = TextView(this).apply {
