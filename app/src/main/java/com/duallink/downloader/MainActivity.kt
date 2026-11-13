@@ -37,9 +37,15 @@ class MainActivity : Activity() {
     private lateinit var stickyBox: CheckBox
     private lateinit var vpnText: TextView
     private lateinit var proxyBox: CheckBox
-    private lateinit var proxyInput: EditText
+    private lateinit var autoBox: CheckBox
     private lateinit var directIrBox: CheckBox
     private lateinit var proxyInfo: TextView
+    private lateinit var configList: LinearLayout
+    private lateinit var chart: SpeedChart
+    private lateinit var stText: TextView
+    private lateinit var stBtn: Button
+    private lateinit var stUrl: EditText
+    private var shownConfigsKey = ""
     private lateinit var updateText: TextView
     private lateinit var updateBtn: Button
 
@@ -58,15 +64,16 @@ class MainActivity : Activity() {
         setContentView(buildUi())
 
         // Read everything first: setting a checkbox fires its listener, which saves all fields.
+        ConfigStore.load(this)
         val savedSticky = prefs.getBoolean("sticky", false)
-        val savedLink = prefs.getString(AggregatorVpnService.PREF_PROXY_LINK, "")
         val savedProxyOn = prefs.getBoolean(AggregatorVpnService.PREF_PROXY_ON, false)
         val savedDirectIr = prefs.getBoolean(AggregatorVpnService.PREF_DIRECT_IR, true)
         stickyBox.isChecked = savedSticky
-        proxyInput.setText(savedLink)
         directIrBox.isChecked = savedDirectIr
         proxyBox.isChecked = savedProxyOn
-        validateProxy()
+        autoBox.isChecked = ConfigStore.auto
+        stUrl.setText(prefs.getString("speedtest_url", SpeedTest.DEFAULT_DOWN))
+        rebuildConfigList()
 
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -104,33 +111,16 @@ class MainActivity : Activity() {
 
     private fun saveProxyPrefs() {
         prefs.edit()
-            .putString(AggregatorVpnService.PREF_PROXY_LINK, proxyInput.text.toString().trim())
             .putBoolean(AggregatorVpnService.PREF_PROXY_ON, proxyBox.isChecked)
             .putBoolean(AggregatorVpnService.PREF_DIRECT_IR, directIrBox.isChecked)
             .apply()
-    }
-
-    /** Shows what the pasted link is, or why it can't be used. Returns false if invalid. */
-    private fun validateProxy(): Boolean {
-        val link = proxyInput.text.toString().trim()
-        if (link.isEmpty()) {
-            proxyInfo.text = "لینک کانفیگ (vless / vmess / trojan / ss) را اینجا بچسبانید."
-            return !proxyBox.isChecked
-        }
-        return try {
-            val p = ProxyConfig.parse(link)
-            val engine = if (ProxyConfig.legacySs(p) != null) "موتور داخلی" else "Xray"
-            proxyInfo.text = "✓ ${p.name} — ${p.protocol} — ${p.host}:${p.port}  ($engine)"
-            true
-        } catch (e: Exception) {
-            proxyInfo.text = "✗ لینک نامعتبر: ${e.message}"
-            false
-        }
+        ConfigStore.auto = autoBox.isChecked
+        ConfigStore.save(this)
     }
 
     private fun startVpn() {
-        if (proxyBox.isChecked && !validateProxy()) {
-            toast("لینک کانفیگ معتبر نیست")
+        if (proxyBox.isChecked && ConfigStore.list().isEmpty()) {
+            toast("اول یک کانفیگ اضافه کنید")
             return
         }
         saveProxyPrefs()
@@ -140,6 +130,96 @@ class MainActivity : Activity() {
                 .setAction(AggregatorVpnService.ACTION_CONNECT)
                 .putExtra(AggregatorVpnService.EX_STICKY, stickyBox.isChecked)
         )
+    }
+
+    // -------------------------------------------------------------- configs
+
+    private val anyNet get() = run {
+        val cm = getSystemService(ConnectivityManager::class.java)
+        cm.activeNetwork?.takeIf {
+            cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) != true
+        }
+    }
+
+    private fun addFromClipboard() {
+        val clip = getSystemService(ClipboardManager::class.java).primaryClip
+        val t = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+        val trimmed = t.trim()
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            ConfigStore.addSubscription(this, trimmed)
+            ConfigStore.refreshSubscriptionsAsync(this) { anyNet }
+            toast("لینک اشتراک اضافه شد؛ در حال دریافت…")
+            return
+        }
+        val n = ConfigStore.addFromText(this, t)
+        toast(if (n > 0) "$n کانفیگ اضافه شد" else "کانفیگ معتبر جدیدی در کلیپ‌بورد نبود")
+        if (n > 0 && !proxyBox.isChecked) proxyBox.isChecked = true
+        rebuildConfigList()
+    }
+
+    private fun askSubscription() {
+        val input = EditText(this).apply {
+            hint = "https://…"
+            textDirection = View.TEXT_DIRECTION_LTR
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("لینک اشتراک (Subscription)")
+            .setView(input)
+            .setPositiveButton("افزودن") { _, _ ->
+                val url = input.text.toString().trim()
+                if (url.startsWith("http")) {
+                    ConfigStore.addSubscription(this, url)
+                    ConfigStore.refreshSubscriptionsAsync(this) { anyNet }
+                } else {
+                    toast("لینک باید با http شروع شود")
+                }
+            }
+            .setNegativeButton("انصراف", null)
+            .show()
+    }
+
+    private fun confirmDelete(index: Int, name: String) {
+        android.app.AlertDialog.Builder(this)
+            .setMessage("کانفیگ «$name» حذف شود؟")
+            .setPositiveButton("حذف") { _, _ -> ConfigStore.remove(this, index); rebuildConfigList() }
+            .setNegativeButton("انصراف", null)
+            .show()
+    }
+
+    /** Rebuilds the config rows (only when the list, selection or pings changed). */
+    private fun rebuildConfigList(force: Boolean = true) {
+        val all = ConfigStore.list()
+        val key = all.joinToString("|") { it.link.hashCode().toString() + ":" + it.pingMs } + "#" + ConfigStore.selected
+        if (!force && key == shownConfigsKey) return
+        shownConfigsKey = key
+        configList.removeAllViews()
+        if (all.isEmpty()) {
+            configList.addView(note("هنوز کانفیگی اضافه نشده. لینک کانفیگ یا لینک اشتراک را کپی کنید و «افزودن از کلیپ‌بورد» را بزنید."))
+            return
+        }
+        for ((i, e) in all.withIndex()) {
+            val sel = i == ConfigStore.selected
+            val ping = when {
+                e.pingMs == -2 -> ""
+                e.pingMs < 0 -> "  ✗"
+                else -> "  ${e.pingMs}ms"
+            }
+            configList.addView(TextView(this).apply {
+                text = (if (sel) "◉ " else "○ ") + e.name + "  — " + e.protocol + ping
+                textSize = 14f
+                setPadding(dp(4), dp(8), dp(4), dp(8))
+                if (sel) setTypeface(typeface, Typeface.BOLD)
+                setTextColor(if (e.pingMs == -1) Color.GRAY else Color.BLACK)
+                setOnClickListener {
+                    ConfigStore.select(this@MainActivity, i)
+                    if (autoBox.isChecked) autoBox.isChecked = false
+                    rebuildConfigList()
+                    hintReconnect()
+                }
+                setOnLongClickListener { confirmDelete(i, e.name); true }
+            })
+        }
     }
 
     @Deprecated("Deprecated in Java")
@@ -176,7 +256,6 @@ class MainActivity : Activity() {
 
     private fun render() {
         val running = VpnState.running
-        proxyInput.isEnabled = !running
         vpnBtn.text = if (running) "خاموش کردن" else "روشن کردن"
         val b = VpnState.balancer
         val sb = StringBuilder("وضعیت: ").append(VpnState.message)
@@ -199,6 +278,17 @@ class MainActivity : Activity() {
             sb.append("\n").append(idleNetworkSummary())
         }
         vpnText.text = sb.toString()
+        chart.invalidate()
+        rebuildConfigList(force = false)
+        val subs = ConfigStore.subscriptions().size
+        proxyInfo.text = buildString {
+            append("${ConfigStore.list().size} کانفیگ")
+            if (subs > 0) append("، $subs اشتراک")
+            if (ConfigStore.message.isNotEmpty()) append("\n").append(ConfigStore.message)
+        }
+
+        stBtn.text = if (SpeedTest.running) "توقف تست" else "شروع تست سرعت"
+        stText.text = (listOf(SpeedTest.phase).filter { it.isNotEmpty() } + SpeedTest.results).joinToString("\n")
 
         val u = StringBuilder("نسخه فعلی: ").append(Updater.currentVersionName(this))
         if (Updater.message.isNotEmpty()) u.append("\n").append(Updater.message)
@@ -270,6 +360,8 @@ class MainActivity : Activity() {
             setPadding(0, dp(4), 0, dp(8))
         }
         root.addView(vpnText)
+        chart = SpeedChart(this)
+        root.addView(chart)
 
         stickyBox = CheckBox(this).apply {
             text = "حالت سازگار: هر سایت فقط از یک لینک (اگر بانک یا سایتی مدام از حساب خارج شد)"
@@ -284,47 +376,74 @@ class MainActivity : Activity() {
         root.addView(title("کانفیگ VPN (اختیاری)"))
         proxyBox = CheckBox(this).apply {
             text = "از طریق کانفیگ VPN — تجمیع روی خود VPN"
-            setOnCheckedChangeListener { _, _ -> validateProxy(); saveProxyPrefs(); hintReconnect() }
+            setOnCheckedChangeListener { _, _ -> saveProxyPrefs(); hintReconnect() }
         }
         root.addView(proxyBox)
-        val proxyRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        autoBox = CheckBox(this).apply {
+            text = "انتخاب خودکار بهترین کانفیگ (کمترین پینگ) و جایگزینی خودکار اگر قطع شد"
+            setOnCheckedChangeListener { _, _ -> saveProxyPrefs(); hintReconnect() }
         }
-        proxyInput = EditText(this).apply {
-            hint = "vless://…  vmess://…  trojan://…  ss://…"
-            textDirection = View.TEXT_DIRECTION_LTR
-            textSize = 12f
-            maxLines = 3
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            setOnFocusChangeListener { _, has -> if (!has) { validateProxy(); saveProxyPrefs() } }
-        }
-        proxyRow.addView(proxyInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        proxyRow.addView(Button(this).apply {
-            text = "چسباندن"
-            setOnClickListener {
-                val clip = getSystemService(ClipboardManager::class.java).primaryClip
-                val t = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this@MainActivity)?.toString()?.trim()
-                val line = t?.lineSequence()?.map { it.trim() }?.firstOrNull {
-                    it.startsWith("vless://") || it.startsWith("vmess://") || it.startsWith("trojan://") || it.startsWith("ss://")
-                }
-                if (line != null) {
-                    proxyInput.setText(line)
-                    proxyBox.isChecked = true
-                    validateProxy(); saveProxyPrefs(); hintReconnect()
-                } else {
-                    toast("لینک کانفیگ در کلیپ‌بورد نیست")
-                }
-            }
-        })
-        root.addView(proxyRow)
-        proxyInfo = note("")
-        root.addView(proxyInfo)
+        root.addView(autoBox)
         directIrBox = CheckBox(this).apply {
             text = "سایت‌های ‎.ir‎ بدون کانفیگ (مستقیم، ولی باز هم تجمیع‌شده)"
             setOnCheckedChangeListener { _, _ -> saveProxyPrefs(); hintReconnect() }
         }
         root.addView(directIrBox)
+
+        fun smallButton(label: String, action: () -> Unit) = Button(this).apply {
+            text = label
+            textSize = 12f
+            setOnClickListener { action() }
+        }
+        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val lp = { LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        row1.addView(smallButton("افزودن از کلیپ‌بورد") { addFromClipboard() }, lp())
+        row1.addView(smallButton("لینک اشتراک") { askSubscription() }, lp())
+        root.addView(row1)
+        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row2.addView(smallButton("تست پینگ همه") { ConfigStore.pingAllAsync({ anyNet }) }, lp())
+        row2.addView(smallButton("به‌روزرسانی اشتراک‌ها") {
+            if (ConfigStore.subscriptions().isEmpty()) toast("اشتراکی ثبت نشده")
+            else ConfigStore.refreshSubscriptionsAsync(this) { anyNet }
+        }, lp())
+        root.addView(row2)
+        proxyInfo = note("")
+        root.addView(proxyInfo)
+        root.addView(note("برای انتخاب روی کانفیگ بزنید؛ برای حذف نگه دارید."))
+        configList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(configList)
+        root.addView(smallButton("حذف همه کانفیگ‌ها و اشتراک‌ها") {
+            android.app.AlertDialog.Builder(this)
+                .setMessage("همه کانفیگ‌ها و اشتراک‌ها حذف شوند؟")
+                .setPositiveButton("حذف همه") { _, _ -> ConfigStore.clearAll(this); rebuildConfigList() }
+                .setNegativeButton("انصراف", null)
+                .show()
+        })
+
+        root.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+        root.addView(title("تست سرعت (چند اتصال، هر لینک جدا)"))
+        root.addView(note("مستقیم روی هر لینک تست می‌کند: فقط وای‌فای، فقط دیتا، هر دو با هم، و آپلود. حدود ۴۰ ثانیه و چند ده مگابایت دیتا مصرف می‌کند."))
+        stUrl = EditText(this).apply {
+            textDirection = View.TEXT_DIRECTION_LTR
+            textSize = 12f
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        }
+        root.addView(stUrl)
+        stBtn = Button(this).apply {
+            setOnClickListener {
+                if (SpeedTest.running) {
+                    SpeedTest.cancel()
+                } else {
+                    val url = stUrl.text.toString().trim().ifEmpty { SpeedTest.DEFAULT_DOWN }
+                    prefs.edit().putString("speedtest_url", url).apply()
+                    SpeedTest.startAsync(this@MainActivity, url, SpeedTest.DEFAULT_UP)
+                }
+            }
+        }
+        root.addView(stBtn)
+        stText = TextView(this).apply { textSize = 14f; setPadding(0, dp(4), 0, dp(8)) }
+        root.addView(stText)
 
         root.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
         root.addView(title("به‌روزرسانی"))

@@ -96,7 +96,7 @@ class SocksServer(
 
         when (cmd) {
             1 -> tcpConnect(c, inp, out, dst)
-            5 -> if (upstream == null) udpForward(c, inp, out) else reply(out, 7) // apps fall back to TCP
+            5 -> udpForward(c, inp, out)
             else -> reply(out, 7) // command not supported
         }
     }
@@ -178,6 +178,7 @@ class SocksServer(
         }
         val ds = DatagramSocket()
         net.bindSocket(ds)
+        val ssAddr = upstream?.let { InetSocketAddress(InetAddress.getByName(it.serverIp), it.serverPort) }
         link.active.incrementAndGet()
         link.total.incrementAndGet()
         totalConnections.incrementAndGet()
@@ -193,15 +194,29 @@ class SocksServer(
                     while (true) {
                         pkt.setData(buf, 0, buf.size)
                         ds.receive(pkt)
-                        val addr = encodeAddress(pkt.address, pkt.port)
-                        val frame = ByteArray(3 + addr.size + pkt.length)
-                        frame[0] = (pkt.length ushr 8).toByte()
-                        frame[1] = pkt.length.toByte()
-                        frame[2] = (3 + addr.size).toByte()
-                        System.arraycopy(addr, 0, frame, 3, addr.size)
-                        System.arraycopy(buf, 0, frame, 3 + addr.size, pkt.length)
+                        val frame: ByteArray
+                        if (ssAddr != null && pkt.address == ssAddr.address && pkt.port == ssAddr.port) {
+                            // From the Shadowsocks server: plain = ATYP ADDR PORT || payload
+                            val plain = upstream!!.ss.decryptPacket(buf, pkt.length) ?: continue
+                            val alen = addrLength(plain) ?: continue
+                            val dlen = plain.size - alen
+                            frame = ByteArray(3 + plain.size)
+                            frame[0] = (dlen ushr 8).toByte()
+                            frame[1] = dlen.toByte()
+                            frame[2] = (3 + alen).toByte()
+                            System.arraycopy(plain, 0, frame, 3, plain.size)
+                            link.down.addAndGet(dlen.toLong())
+                        } else {
+                            val addr = encodeAddress(pkt.address, pkt.port)
+                            frame = ByteArray(3 + addr.size + pkt.length)
+                            frame[0] = (pkt.length ushr 8).toByte()
+                            frame[1] = pkt.length.toByte()
+                            frame[2] = (3 + addr.size).toByte()
+                            System.arraycopy(addr, 0, frame, 3, addr.size)
+                            System.arraycopy(buf, 0, frame, 3 + addr.size, pkt.length)
+                            link.down.addAndGet(pkt.length.toLong())
+                        }
                         synchronized(out) { out.write(frame); out.flush() }
-                        link.down.addAndGet(pkt.length.toLong())
                     }
                 } catch (_: Exception) {
                 } finally {
@@ -218,6 +233,16 @@ class SocksServer(
                     inp.readUnsignedByte() // hdrlen; the address below tells us its size
                     val dst = readAddress(inp)
                     inp.readFully(data, 0, datlen)
+                    if (ssAddr != null && !(directIr && dst.isName && dst.host.endsWith(".ir", ignoreCase = true))) {
+                        val header = targetHeader(dst)
+                        val plain = ByteArray(header.size + datlen)
+                        System.arraycopy(header, 0, plain, 0, header.size)
+                        System.arraycopy(data, 0, plain, header.size, datlen)
+                        val enc = upstream!!.ss.encryptPacket(plain, plain.size)
+                        ds.send(DatagramPacket(enc, enc.size, ssAddr))
+                        link.up.addAndGet(datlen.toLong())
+                        continue
+                    }
                     val target = if (dst.isName) {
                         dnsCache.getOrPut(dst.host) {
                             Balancer.resolve(net, dst.host, true).first()
@@ -260,6 +285,18 @@ class SocksServer(
             }
             else -> throw IOException("bad ATYP $atyp")
         }
+    }
+
+    /** Length of the ATYP ADDR PORT prefix in a decrypted Shadowsocks UDP packet. */
+    private fun addrLength(p: ByteArray): Int? {
+        if (p.isEmpty()) return null
+        val n = when (p[0].toInt()) {
+            1 -> 1 + 4 + 2
+            4 -> 1 + 16 + 2
+            3 -> if (p.size > 1) 1 + 1 + (p[1].toInt() and 0xff) + 2 else return null
+            else -> return null
+        }
+        return if (n <= p.size) n else null
     }
 
     /** SOCKS-style address of the real destination, sent first inside the Shadowsocks stream. */

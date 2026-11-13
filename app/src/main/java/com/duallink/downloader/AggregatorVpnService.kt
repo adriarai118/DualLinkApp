@@ -92,6 +92,7 @@ class AggregatorVpnService : VpnService() {
                 l.lastUp = u
                 l.capacityBps = maxOf(l.capacityBps * 0.995, l.downBps)
             }
+            if (!SpeedTest.running) SpeedHistory.push(b.links[0].downBps, b.links[1].downBps)
             updateUnderlying()
             val total = b.links.sumOf { it.downBps }
             notifyStatus("↓ ${fmtSpeed(total)}  —  " +
@@ -138,19 +139,29 @@ class AggregatorVpnService : VpnService() {
     private fun connect(sticky: Boolean) {
         try {
             val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-            val proxyLink = prefs.getString(PREF_PROXY_LINK, "").orEmpty()
-            proxyMode = prefs.getBoolean(PREF_PROXY_ON, false) && proxyLink.isNotBlank()
-            val parsed = if (proxyMode) ProxyConfig.parse(proxyLink) else null
-            val legacy = parsed?.let { ProxyConfig.legacySs(it) }
+            ConfigStore.load(this)
 
             val lm = LinkManager(this).also { it.start(useWifi = true, useCell = true) }
             links = lm
+            waitForLinks(lm)
+
+            proxyMode = prefs.getBoolean(PREF_PROXY_ON, false) && ConfigStore.list().isNotEmpty()
+            if (proxyMode && ConfigStore.auto) {
+                VpnState.message = "در حال پیدا کردن بهترین کانفیگ (تست پینگ)…"
+                ConfigStore.pingAllBlocking(lm.wifi ?: lm.cell)
+                if (!ConfigStore.selectBest(this, deadConfigs)) {
+                    deadConfigs.clear() // everything failed once: start over next time
+                    throw IllegalStateException("هیچ‌کدام از کانفیگ‌ها پاسخ ندادند")
+                }
+            }
+            val entry = if (proxyMode) ConfigStore.current() else null
+            val parsed = entry?.let { ProxyConfig.parse(it.link) }
+            val legacy = parsed?.let { ProxyConfig.legacySs(it) }
+
             val balancer = Balancer(listOf(
                 VpnLink("وای‌فای") { lm.wifi },
                 VpnLink("داده همراه") { lm.cell },
             ), countsActive = !proxyMode || legacy != null).also { it.sticky = sticky }
-
-            waitForLinks(lm)
 
             val socksPort: Int
             val udpMode: String
@@ -251,9 +262,44 @@ class AggregatorVpnService : VpnService() {
                 "روشن — همه برنامه‌ها از هر دو لینک استفاده می‌کنند"
             }
             handler.post(meter)
+            if (entry != null && ConfigStore.auto) startHealthCheck(entry, lm, sticky)
         } catch (e: Throwable) {
             disconnect("خطا: ${e.message ?: e.javaClass.simpleName}")
         }
+    }
+
+    // ------------------------------------------------------------ failover
+
+    /** Configs that stopped answering during this session (skipped by auto-select). */
+    private val deadConfigs = HashSet<String>()
+    @Volatile private var healthGen = 0
+
+    /**
+     * Auto mode: every 15 s check the server still accepts connections; after 3
+     * failures in a row, switch to the next-best config.
+     */
+    private fun startHealthCheck(entry: ConfigStore.Entry, lm: LinkManager, sticky: Boolean) {
+        val gen = ++healthGen
+        Thread({
+            var fails = 0
+            while (gen == healthGen && VpnState.running) {
+                try { Thread.sleep(15_000) } catch (_: InterruptedException) { return@Thread }
+                if (gen != healthGen || !VpnState.running) return@Thread
+                val ms = ConfigStore.ping(entry.host, entry.port, lm.wifi ?: lm.cell, 5000)
+                entry.pingMs = ms
+                fails = if (ms < 0) fails + 1 else 0
+                if (fails >= 3) {
+                    deadConfigs += entry.link
+                    handler.post {
+                        if (gen == healthGen) {
+                            disconnect("کانفیگ «${entry.name}» قطع شد؛ رفتن سراغ کانفیگ بعدی…", stopService = false)
+                            connectAsync(sticky)
+                        }
+                    }
+                    return@Thread
+                }
+            }
+        }, "health-check").apply { isDaemon = true; start() }
     }
 
     /** Mobile data needs a few seconds to come up next to Wi-Fi; don't start without it. */
@@ -321,7 +367,8 @@ class AggregatorVpnService : VpnService() {
     }
 
     @Synchronized
-    private fun disconnect(msg: String) {
+    private fun disconnect(msg: String, stopService: Boolean = true) {
+        healthGen++
         handler.removeCallbacks(meter)
         try { TProxyService.TProxyStopService() } catch (_: Throwable) {}
         try { tun?.close() } catch (_: Exception) {}
@@ -340,7 +387,10 @@ class AggregatorVpnService : VpnService() {
         VpnState.running = false
         VpnState.message = msg
         getSystemService(NotificationManager::class.java).cancel(NID)
-        stopSelf()
+        if (stopService) {
+            deadConfigs.clear()
+            stopSelf()
+        }
     }
 
     override fun onRevoke() {

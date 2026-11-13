@@ -93,6 +93,20 @@ class LegacyShadowsocks(val method: String, password: String) {
         }
     }
 
+    /** UDP: every packet is IV || E(ATYP ADDR PORT || payload) with its own fresh IV. */
+    fun encryptPacket(data: ByteArray, len: Int): ByteArray {
+        val iv = ByteArray(spec.ivLen).also { random.nextBytes(it) }
+        val enc = newCipher(Cipher.ENCRYPT_MODE, iv).doFinal(data, 0, len)
+        return iv + enc
+    }
+
+    /** Returns ATYP ADDR PORT || payload, or null if the packet is too short. */
+    fun decryptPacket(data: ByteArray, len: Int): ByteArray? {
+        if (len <= spec.ivLen) return null
+        val iv = data.copyOfRange(0, spec.ivLen)
+        return newCipher(Cipher.DECRYPT_MODE, iv).doFinal(data, spec.ivLen, len - spec.ivLen)
+    }
+
     companion object {
         private val SPECS = mapOf(
             "rc4-md5" to Spec(16, 16, "RC4"),
