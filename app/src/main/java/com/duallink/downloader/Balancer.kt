@@ -123,7 +123,10 @@ class Balancer(val links: List<VpnLink>, private val countsActive: Boolean = tru
     fun connect(host: String, port: Int, isName: Boolean): Pair<VpnLink, Socket> {
         var last: Exception? = null
         val failed = ArrayList<VpnLink>(2)
-        for (link in order(host)) {
+        // A private/LAN address (e.g. a local hostname) is only reachable on Wi-Fi.
+        val local = !isName && runCatching { Routes.isLocal(InetAddress.getByName(host)) }.getOrDefault(false)
+        val candidates = if (local) order(host).sortedBy { if (it === links[0]) 0 else 1 } else order(host)
+        for (link in candidates) {
             val net = link.network ?: continue
             try {
                 val addrs = resolve(net, host, isName)

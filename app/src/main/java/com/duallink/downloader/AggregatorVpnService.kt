@@ -202,11 +202,12 @@ class AggregatorVpnService : VpnService() {
                 .setSession("DualLink")
                 .setMtu(MTU)
                 .addAddress(TUN_IPV4, 32)
-                .addRoute("0.0.0.0", 0)
                 .addAddress(TUN_IPV6, 128)
-                .addRoute("::", 0)
                 .addDnsServer(MAPPED_DNS)
                 .setBlocking(false)
+            // Everything except LAN/private ranges: local network traffic bypasses the VPN.
+            for ((ip, len) in Routes.V4) b.addRoute(ip, len)
+            for ((ip, len) in Routes.V6) b.addRoute(ip, len)
             // Our own sockets must not loop back into the VPN.
             b.addDisallowedApplication(packageName)
             if (Build.VERSION.SDK_INT >= 29) b.setMetered(false)
