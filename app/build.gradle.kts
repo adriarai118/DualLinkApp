@@ -16,8 +16,10 @@ android {
         applicationId = "com.duallink.downloader"
         minSdk = 24
         targetSdk = 34
-        versionCode = 3
-        versionName = "3.0"
+        // CI build number => every published build is a higher version (used by in-app update).
+        val build = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
+        versionCode = 1000 + build
+        versionName = "4.$build"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -38,9 +40,23 @@ android {
         }
     }
 
+    // One fixed key for every build, so each new APK installs over the previous one.
+    signingConfigs {
+        create("fixed") {
+            storeFile = rootProject.file("signing/duallink.jks")
+            storePassword = "duallink-sign"
+            keyAlias = "duallink"
+            keyPassword = "duallink-sign"
+        }
+    }
+
     buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("fixed")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("fixed")
         }
     }
 
