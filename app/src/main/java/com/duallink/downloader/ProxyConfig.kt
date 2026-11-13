@@ -133,8 +133,11 @@ object ProxyConfig {
             val all = String(b64(main), Charsets.UTF_8)
             all.substringBeforeLast('@') to all.substringAfterLast('@')
         }
-        val method = userInfo.substringBefore(':')
+        val method = userInfo.substringBefore(':').lowercase()
         val password = userInfo.substringAfter(':')
+        if (method !in XRAY_SS_METHODS && !LegacyShadowsocks.supports(method)) {
+            throw IllegalArgumentException("رمزنگاری «$method» پشتیبانی نمی‌شود")
+        }
         val host = hostPort.substringBeforeLast(':').trim('[', ']')
         val port = hostPort.substringAfterLast(':').toIntOrNull() ?: throw IllegalArgumentException("پورت در لینک ss نیست")
         val out = JSONObject()
@@ -207,6 +210,20 @@ object ProxyConfig {
     }
 
     // -------------------------------------------------------------- helpers
+
+    private val XRAY_SS_METHODS = setOf(
+        "aes-128-gcm", "aes-256-gcm", "chacha20-poly1305", "chacha20-ietf-poly1305",
+        "xchacha20-poly1305", "xchacha20-ietf-poly1305", "none", "plain",
+        "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
+    )
+
+    /** Old Shadowsocks cipher that Xray can't do; the app handles it itself. */
+    fun legacySs(p: Parsed): LegacyShadowsocks? {
+        if (p.protocol != "shadowsocks") return null
+        val st = p.outbound.getJSONObject("settings")
+        val method = st.getString("method")
+        return if (LegacyShadowsocks.supports(method)) LegacyShadowsocks(method, st.getString("password")) else null
+    }
 
     private fun params(u: Uri): Map<String, String> {
         val m = HashMap<String, String>()

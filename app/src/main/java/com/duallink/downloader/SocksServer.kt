@@ -26,7 +26,16 @@ import java.util.concurrent.atomic.AtomicLong
  *    [datlen:u16][hdrlen:u8 = 3+addrlen][ATYP ADDR PORT][payload].
  *    A whole flow stays on one link, since QUIC breaks if its packets change IP.
  */
-class SocksServer(private val balancer: Balancer) {
+class SocksServer(
+    private val balancer: Balancer,
+    /** If set, every TCP connection is tunnelled through this old-style Shadowsocks server. */
+    private val upstream: Upstream? = null,
+    /** With an upstream: send .ir sites directly instead of through it. */
+    private val directIr: Boolean = false,
+) {
+
+    class Upstream(val ss: LegacyShadowsocks, val serverIp: String, val serverPort: Int)
+
 
     private val server = ServerSocket(0, 1024, InetAddress.getByName("127.0.0.1"))
     private val clients = Collections.synchronizedSet(mutableSetOf<Socket>())
@@ -87,7 +96,7 @@ class SocksServer(private val balancer: Balancer) {
 
         when (cmd) {
             1 -> tcpConnect(c, inp, out, dst)
-            5 -> udpForward(c, inp, out)
+            5 -> if (upstream == null) udpForward(c, inp, out) else reply(out, 7) // apps fall back to TCP
             else -> reply(out, 7) // command not supported
         }
     }
@@ -95,8 +104,10 @@ class SocksServer(private val balancer: Balancer) {
     // ------------------------------------------------------------------ TCP
 
     private fun tcpConnect(c: Socket, inp: InputStream, out: OutputStream, dst: SocksAddr) {
+        val up = upstream?.takeUnless { directIr && dst.isName && dst.host.endsWith(".ir", ignoreCase = true) }
         val (link, remote) = try {
-            balancer.connect(dst.host, dst.port, dst.isName)
+            if (up != null) balancer.connect(up.serverIp, up.serverPort, false)
+            else balancer.connect(dst.host, dst.port, dst.isName)
         } catch (e: Exception) {
             reply(out, 5) // connection refused
             return
@@ -109,16 +120,41 @@ class SocksServer(private val balancer: Balancer) {
             reply(out, 0)
             c.soTimeout = 0
 
+            val ss = up?.ss
+            val writer = ss?.Writer(remote.getOutputStream())
+            writer?.let { val h = targetHeader(dst); it.write(h, 0, h.size) }
+
             val downstream = spawn("socks-down") {
                 try {
-                    pump(remote.getInputStream(), out, link.down)
+                    if (ss == null) {
+                        pump(remote.getInputStream(), out, link.down)
+                    } else {
+                        val reader = ss.Reader(remote.getInputStream())
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = reader.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            link.down.addAndGet(n.toLong())
+                        }
+                    }
                 } catch (_: Exception) {
                 } finally {
                     try { c.shutdownOutput() } catch (_: Exception) {}
                 }
             }
             try {
-                pump(inp, remote.getOutputStream(), link.up)
+                if (writer == null) {
+                    pump(inp, remote.getOutputStream(), link.up)
+                } else {
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = inp.read(buf)
+                        if (n < 0) break
+                        writer.write(buf, 0, n)
+                        link.up.addAndGet(n.toLong())
+                    }
+                }
                 try { remote.shutdownOutput() } catch (_: Exception) {}
             } catch (_: Exception) {
                 closeQuietly(remote)
@@ -224,6 +260,21 @@ class SocksServer(private val balancer: Balancer) {
             }
             else -> throw IOException("bad ATYP $atyp")
         }
+    }
+
+    /** SOCKS-style address of the real destination, sent first inside the Shadowsocks stream. */
+    private fun targetHeader(dst: SocksAddr): ByteArray {
+        if (dst.isName) {
+            val name = dst.host.toByteArray(Charsets.US_ASCII)
+            val r = ByteArray(2 + name.size + 2)
+            r[0] = 3
+            r[1] = name.size.toByte()
+            System.arraycopy(name, 0, r, 2, name.size)
+            r[r.size - 2] = (dst.port ushr 8).toByte()
+            r[r.size - 1] = dst.port.toByte()
+            return r
+        }
+        return encodeAddress(InetAddress.getByName(dst.host), dst.port)
     }
 
     private fun encodeAddress(a: InetAddress, port: Int): ByteArray {

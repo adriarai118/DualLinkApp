@@ -82,7 +82,7 @@ class AggregatorVpnService : VpnService() {
     private val meter = object : Runnable {
         override fun run() {
             val b = VpnState.balancer ?: return
-            if (proxyMode) measureViaSystemCounters(b)
+            if (xrayRunning) measureViaSystemCounters(b)
             for (l in b.links) {
                 val d = l.down.get()
                 val u = l.up.get()
@@ -141,19 +141,34 @@ class AggregatorVpnService : VpnService() {
             val proxyLink = prefs.getString(PREF_PROXY_LINK, "").orEmpty()
             proxyMode = prefs.getBoolean(PREF_PROXY_ON, false) && proxyLink.isNotBlank()
             val parsed = if (proxyMode) ProxyConfig.parse(proxyLink) else null
+            val legacy = parsed?.let { ProxyConfig.legacySs(it) }
 
             val lm = LinkManager(this).also { it.start(useWifi = true, useCell = true) }
             links = lm
             val balancer = Balancer(listOf(
                 VpnLink("وای‌فای") { lm.wifi },
                 VpnLink("داده همراه") { lm.cell },
-            ), countsActive = !proxyMode).also { it.sticky = sticky }
+            ), countsActive = !proxyMode || legacy != null).also { it.sticky = sticky }
 
             waitForLinks(lm)
 
             val socksPort: Int
             val udpMode: String
-            if (parsed != null) {
+            if (parsed != null && legacy != null) {
+                // Old Shadowsocks cipher: our own relay speaks it, per-connection balanced.
+                val serverIp = resolveServer(lm, parsed.host) ?: parsed.host
+                val server = SocksServer(
+                    balancer,
+                    SocksServer.Upstream(legacy, serverIp, parsed.port),
+                    prefs.getBoolean(PREF_DIRECT_IR, true),
+                ).also { it.start() }
+                socks = server
+                VpnState.socks = server
+                VpnState.xrayLog = null
+                socksPort = server.port
+                udpMode = "tcp"
+                VpnState.proxyName = parsed.name
+            } else if (parsed != null) {
                 socksPort = ServerSocket(0).use { it.localPort }
                 // Resolve the server here (Android's resolver works; Go's doesn't on Android).
                 val serverIp = resolveServer(lm, parsed.host)
