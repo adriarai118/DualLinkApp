@@ -47,6 +47,7 @@ class MainActivity : Activity() {
     private lateinit var stUrl: EditText
     private var shownConfigsKey = ""
     private lateinit var updateText: TextView
+    private lateinit var diagText: TextView
     private lateinit var updateBtn: Button
 
     private val handler = Handler(Looper.getMainLooper())
@@ -298,6 +299,7 @@ class MainActivity : Activity() {
                     .append(" — ").append(fmtSpeed(e.totalSpeedBps))
             }
         }
+        diagText.text = DiagLog.last(12).joinToString("\n").ifEmpty { "هنوز رویدادی ثبت نشده. تجمیع را روشن کنید یا تست سرعت بگیرید." }
         Updater.available?.notes?.takeIf { it.isNotBlank() }?.let { u.append("\nتغییرات: ").append(it) }
         updateText.text = u.toString()
         updateBtn.isEnabled = !Updater.busy
@@ -444,6 +446,48 @@ class MainActivity : Activity() {
         root.addView(stBtn)
         stText = TextView(this).apply { textSize = 14f; setPadding(0, dp(4), 0, dp(8)) }
         root.addView(stText)
+
+        root.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+        root.addView(title("عیب‌یابی"))
+        root.addView(note(
+            "وضعیت هر شبکه از نگاه اندروید، اتصال‌های هر لینک و خطاها. گزارش کامل را کپی کنید و بفرستید. " +
+                "گزارش شامل نام سایت‌هایی است که باز شده‌اند."
+        ))
+        diagText = TextView(this).apply {
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            setTextColor(Color.DKGRAY)
+            setPadding(0, dp(4), 0, dp(4))
+            setTextIsSelectable(true)
+        }
+        root.addView(diagText)
+        val diagRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val dlp = { LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        diagRow.addView(Button(this).apply {
+            text = "کپی گزارش"
+            textSize = 12f
+            setOnClickListener {
+                val cb = getSystemService(ClipboardManager::class.java)
+                cb.setPrimaryClip(android.content.ClipData.newPlainText("DualLink diagnostics", Diagnostics.report(this@MainActivity)))
+                toast("گزارش کپی شد")
+            }
+        }, dlp())
+        diagRow.addView(Button(this).apply {
+            text = "ارسال گزارش"
+            textSize = 12f
+            setOnClickListener {
+                val send = Intent(Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .putExtra(Intent.EXTRA_TEXT, Diagnostics.report(this@MainActivity))
+                startActivity(Intent.createChooser(send, "ارسال گزارش عیب‌یابی"))
+            }
+        }, dlp())
+        diagRow.addView(Button(this).apply {
+            text = "پاک کردن"
+            textSize = 12f
+            setOnClickListener { DiagLog.clear(); toast("رویدادها پاک شد") }
+        }, dlp())
+        root.addView(diagRow)
 
         root.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
         root.addView(title("به‌روزرسانی"))

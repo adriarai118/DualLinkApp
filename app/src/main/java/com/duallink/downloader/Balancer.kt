@@ -23,6 +23,7 @@ open class VpnLink(val name: String, private val provider: () -> Network?) {
     @Volatile var capacityBps = 0.0
     /** While now < badUntil the link only gets connections if nothing else works. */
     @Volatile var badUntil = 0L
+    @Volatile var lastError: String? = null
     internal val recentFails = AtomicInteger(0)
     internal var lastDown = 0L
     internal var lastUp = 0L
@@ -115,6 +116,7 @@ class Balancer(val links: List<VpnLink>, private val countsActive: Boolean = tru
         link.failures.incrementAndGet()
         if (link.recentFails.incrementAndGet() >= 3) {
             link.badUntil = SystemClock.elapsedRealtime() + 10_000
+            DiagLog.add("${link.name} به‌خاطر ۳ خطای پشت سر هم ۱۰ ثانیه کنار گذاشته شد")
             link.recentFails.set(0)
         }
     }
@@ -152,7 +154,11 @@ class Balancer(val links: List<VpnLink>, private val countsActive: Boolean = tru
                 last = e
             }
             failed += link
+            val why = last?.let { it.message ?: it.javaClass.simpleName } ?: "?"
+            link.lastError = "$host:$port — $why"
+            DiagLog.add("✗ $host:$port روی ${link.name}: $why")
         }
+        if (failed.isEmpty()) DiagLog.add("✗ $host:$port: هیچ لینکی وصل نیست")
         throw IOException("no link could connect to $host:$port", last)
     }
 

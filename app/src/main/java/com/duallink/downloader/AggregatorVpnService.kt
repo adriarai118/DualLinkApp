@@ -141,14 +141,19 @@ class AggregatorVpnService : VpnService() {
             val prefs = getSharedPreferences("settings", MODE_PRIVATE)
             ConfigStore.load(this)
 
-            val lm = LinkManager(this).also { it.start(useWifi = true, useCell = true) }
+            DiagLog.add("— روشن کردن تجمیع —")
+            val lm = LinkManager(this, log = true).also { it.start(useWifi = true, useCell = true) }
             links = lm
             waitForLinks(lm)
+            DiagLog.add("بعد از انتظار: وای‌فای ${if (lm.wifi != null) "هست" else "نیست"}، دیتا ${if (lm.cell != null) "هست" else "نیست"}")
 
             proxyMode = prefs.getBoolean(PREF_PROXY_ON, false) && ConfigStore.list().isNotEmpty()
             if (proxyMode && ConfigStore.auto) {
                 VpnState.message = "در حال پیدا کردن بهترین کانفیگ (تست پینگ)…"
                 ConfigStore.pingAllBlocking(lm.wifi ?: lm.cell)
+                DiagLog.add("پینگ کانفیگ‌ها: " + ConfigStore.list().joinToString("، ") {
+                    "${it.name}=${if (it.pingMs >= 0) "${it.pingMs}ms" else "✗"}"
+                })
                 if (!ConfigStore.selectBest(this, deadConfigs)) {
                     deadConfigs.clear() // everything failed once: start over next time
                     throw IllegalStateException("هیچ‌کدام از کانفیگ‌ها پاسخ ندادند")
@@ -157,6 +162,11 @@ class AggregatorVpnService : VpnService() {
             val entry = if (proxyMode) ConfigStore.current() else null
             val parsed = entry?.let { ProxyConfig.parse(it.link) }
             val legacy = parsed?.let { ProxyConfig.legacySs(it) }
+            DiagLog.add(when {
+                parsed == null -> "حالت: مستقیم"
+                legacy != null -> "حالت: کانفیگ «${parsed.name}» (${parsed.protocol} ${legacy.method}) با موتور داخلی"
+                else -> "حالت: کانفیگ «${parsed.name}» (${parsed.protocol}) با Xray"
+            })
 
             val balancer = Balancer(listOf(
                 VpnLink("وای‌فای") { lm.wifi },
@@ -262,8 +272,10 @@ class AggregatorVpnService : VpnService() {
                 "روشن — همه برنامه‌ها از هر دو لینک استفاده می‌کنند"
             }
             handler.post(meter)
+            DiagLog.add("تجمیع روشن شد")
             if (entry != null && ConfigStore.auto) startHealthCheck(entry, lm, sticky)
         } catch (e: Throwable) {
+            DiagLog.add("✗ خطا هنگام روشن شدن: ${e.javaClass.simpleName}: ${e.message}")
             disconnect("خطا: ${e.message ?: e.javaClass.simpleName}")
         }
     }
@@ -288,6 +300,7 @@ class AggregatorVpnService : VpnService() {
                 val ms = ConfigStore.ping(entry.host, entry.port, lm.wifi ?: lm.cell, 5000)
                 entry.pingMs = ms
                 fails = if (ms < 0) fails + 1 else 0
+                if (ms < 0) DiagLog.add("سلامت کانفیگ «${entry.name}»: جواب نداد ($fails از ۳)")
                 if (fails >= 3) {
                     deadConfigs += entry.link
                     handler.post {
@@ -369,6 +382,7 @@ class AggregatorVpnService : VpnService() {
     @Synchronized
     private fun disconnect(msg: String, stopService: Boolean = true) {
         healthGen++
+        DiagLog.add("— خاموش: $msg —")
         handler.removeCallbacks(meter)
         try { TProxyService.TProxyStopService() } catch (_: Throwable) {}
         try { tun?.close() } catch (_: Exception) {}

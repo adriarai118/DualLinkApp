@@ -17,24 +17,42 @@ import android.net.NetworkRequest
  *
  * Note: requested networks are non-VPN, so traffic here bypasses any active VPN app.
  */
-class LinkManager(context: Context) {
+class LinkManager(context: Context, private val log: Boolean = false) {
 
     private val cm = context.getSystemService(ConnectivityManager::class.java)
 
-    private inner class Slot(val transport: Int) : ConnectivityManager.NetworkCallback() {
+    private inner class Slot(val transport: Int, val label: String) : ConnectivityManager.NetworkCallback() {
         @Volatile var network: Network? = null
+        @Volatile var validated: Boolean? = null
 
         override fun onAvailable(network: Network) {
             this.network = network
+            if (log) DiagLog.add("شبکه $label وصل شد (${Diagnostics.describe(cm, network)})")
         }
 
         override fun onLost(network: Network) {
-            if (this.network == network) this.network = null
+            if (this.network == network) {
+                this.network = null
+                validated = null
+                if (log) DiagLog.add("شبکه $label قطع شد")
+            }
+        }
+
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            val v = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            if (log && v != validated) {
+                DiagLog.add(if (v) "$label: اینترنت تأیید شد (VALIDATED)" else "$label: اینترنت تأیید نشده (NOT validated)")
+            }
+            validated = v
+        }
+
+        override fun onUnavailable() {
+            if (log) DiagLog.add("اندروید شبکه $label را نداد")
         }
     }
 
-    private val wifiSlot = Slot(NetworkCapabilities.TRANSPORT_WIFI)
-    private val cellSlot = Slot(NetworkCapabilities.TRANSPORT_CELLULAR)
+    private val wifiSlot = Slot(NetworkCapabilities.TRANSPORT_WIFI, "وای‌فای")
+    private val cellSlot = Slot(NetworkCapabilities.TRANSPORT_CELLULAR, "دیتا")
     private val registered = mutableListOf<Slot>()
 
     val wifi: Network? get() = wifiSlot.network
@@ -56,6 +74,7 @@ class LinkManager(context: Context) {
             .build()
         cm.requestNetwork(req, slot)
         registered += slot
+        if (log) DiagLog.add("درخواست شبکه ${slot.label} ثبت شد")
     }
 
     fun stop() {

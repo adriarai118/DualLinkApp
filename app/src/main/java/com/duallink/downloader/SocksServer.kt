@@ -116,6 +116,9 @@ class SocksServer(
         link.active.incrementAndGet()
         link.total.incrementAndGet()
         totalConnections.incrementAndGet()
+        val connDown = AtomicLong(0)
+        val connUp = AtomicLong(0)
+        val t0 = System.currentTimeMillis()
         try {
             reply(out, 0)
             c.soTimeout = 0
@@ -127,7 +130,7 @@ class SocksServer(
             val downstream = spawn("socks-down") {
                 try {
                     if (ss == null) {
-                        pump(remote.getInputStream(), out, link.down)
+                        pump(remote.getInputStream(), out, link.down, connDown)
                     } else {
                         val reader = ss.Reader(remote.getInputStream())
                         val buf = ByteArray(64 * 1024)
@@ -136,6 +139,7 @@ class SocksServer(
                             if (n < 0) break
                             out.write(buf, 0, n)
                             link.down.addAndGet(n.toLong())
+                            connDown.addAndGet(n.toLong())
                         }
                     }
                 } catch (_: Exception) {
@@ -145,7 +149,7 @@ class SocksServer(
             }
             try {
                 if (writer == null) {
-                    pump(inp, remote.getOutputStream(), link.up)
+                    pump(inp, remote.getOutputStream(), link.up, connUp)
                 } else {
                     val buf = ByteArray(64 * 1024)
                     while (true) {
@@ -153,6 +157,7 @@ class SocksServer(
                         if (n < 0) break
                         writer.write(buf, 0, n)
                         link.up.addAndGet(n.toLong())
+                        connUp.addAndGet(n.toLong())
                     }
                 }
                 try { remote.shutdownOutput() } catch (_: Exception) {}
@@ -164,6 +169,8 @@ class SocksServer(
             link.active.decrementAndGet()
             clients.remove(remote)
             closeQuietly(remote)
+            val via = if (up != null) " (از طریق کانفیگ)" else ""
+            DiagLog.add("✓ ${dst.host}:${dst.port} روی ${link.name}$via — ↓${fmtBytes(connDown.get())} ↑${fmtBytes(connUp.get())} در ${(System.currentTimeMillis() - t0) / 1000.0}s")
         }
     }
 
@@ -173,9 +180,11 @@ class SocksServer(
         val link = balancer.order("udp").firstOrNull()
         val net = link?.network
         if (link == null || net == null) {
+            DiagLog.add("✗ UDP: هیچ لینکی وصل نیست")
             reply(out, 1)
             return
         }
+        DiagLog.add("UDP جریان جدید روی ${link.name}")
         val ds = DatagramSocket()
         net.bindSocket(ds)
         val ssAddr = upstream?.let { InetSocketAddress(InetAddress.getByName(it.serverIp), it.serverPort) }
@@ -331,13 +340,14 @@ class SocksServer(
         out.flush()
     }
 
-    private fun pump(src: InputStream, dst: OutputStream, counter: AtomicLong) {
+    private fun pump(src: InputStream, dst: OutputStream, counter: AtomicLong, conn: AtomicLong) {
         val buf = ByteArray(64 * 1024)
         while (true) {
             val n = src.read(buf)
             if (n < 0) return
             dst.write(buf, 0, n)
             counter.addAndGet(n.toLong())
+            conn.addAndGet(n.toLong())
         }
     }
 

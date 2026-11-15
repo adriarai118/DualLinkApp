@@ -73,6 +73,7 @@ object SpeedTest {
                     out += if (usable.size > 1) "$title: ${SpeedChart.fmtMbps(sum)}  (${parts.joinToString(" + ")})"
                            else "$title: ${SpeedChart.fmtMbps(sum)}"
                     results = out.toList()
+                    DiagLog.add("تست سرعت — ${out.last()}")
                     return sum
                 }
 

@@ -31,13 +31,17 @@ class LinkProtector(
                 net.bindSocket(pfd.fileDescriptor)
                 link.total.incrementAndGet()
                 balancer.reportSuccess(link)
+                DiagLog.add("Xray ${network.orEmpty()} → $addr روی ${link.name}")
                 return true
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 balancer.reportFailure(link)
+                link.lastError = "bind: ${e.message}"
+                DiagLog.add("✗ Xray bind روی ${link.name}: ${e.message}")
             } finally {
                 try { pfd?.close() } catch (_: Exception) {}
             }
         }
+        DiagLog.add("✗ Xray → $addr: هیچ لینکی در دسترس نیست")
         return false
     }
 }
