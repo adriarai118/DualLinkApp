@@ -52,9 +52,21 @@ jobs:
           ls -la ../app/libs
 
       # ---- App
-      - name: Build debug APK
+      # Unit + integration tests. A failing test stops the build: nothing gets published.
+      - name: Run tests
         run: |
           chmod +x gradlew
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: app/build/reports/tests/testDebugUnitTest/
+
+      - name: Build debug APK
+        run: |
           ./gradlew assembleDebug --no-daemon --stacktrace
           cp app/build/outputs/apk/debug/app-debug.apk DualLink.apk
 
@@ -68,6 +80,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          { echo "versionCode=$((1000 + GITHUB_RUN_NUMBER))"; git log -1 --format=%s; } > notes.txt
+          {
+            echo "versionCode=$((1000 + GITHUB_RUN_NUMBER))"
+            echo "sha256=$(sha256sum DualLink.apk | cut -d' ' -f1)"
+            echo "size=$(stat -c %s DualLink.apk)"
+            git log -1 --format=%s
+          } > notes.txt
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest DualLink.apk --title "DualLink (build ${GITHUB_RUN_NUMBER})" --notes-file notes.txt

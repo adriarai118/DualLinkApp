@@ -34,7 +34,7 @@ class LegacyShadowsocks(val method: String, password: String) {
             md5.update(key)
             md5.update(iv)
             val c = try { Cipher.getInstance("ARC4") } catch (_: Exception) { Cipher.getInstance("RC4") }
-            c.init(mode, SecretKeySpec(md5.digest(), "ARC4"))
+            c.init(mode, SecretKeySpec(md5.digest(), "RC4"))
             c
         } else {
             val c = Cipher.getInstance(spec.transform)

@@ -422,7 +422,7 @@ class MainActivity : Activity() {
 
         root.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
         root.addView(title("تست سرعت (چند اتصال، هر لینک جدا)"))
-        root.addView(note("مستقیم روی هر لینک تست می‌کند: فقط وای‌فای، فقط دیتا، هر دو با هم، و آپلود. حدود ۴۰ ثانیه و چند ده مگابایت دیتا مصرف می‌کند."))
+        root.addView(note("مستقیم روی هر لینک تست می‌کند: یک اتصال معمولی، فقط وای‌فای، فقط دیتا، هر دو با هم، و آپلود. حدود ۵۰ ثانیه و چند ده مگابایت دیتا مصرف می‌کند."))
         stUrl = EditText(this).apply {
             textDirection = View.TEXT_DIRECTION_LTR
             textSize = 12f

@@ -24,7 +24,7 @@ object Updater {
     private const val PREF_LAST_CHECK = "update_last_check"
     const val ACTION_INSTALL_STATUS = "com.duallink.downloader.INSTALL_STATUS"
 
-    class Info(val versionCode: Long, val url: String, val size: Long, val notes: String)
+    class Info(val versionCode: Long, val url: String, val size: Long, val sha256: String?, val notes: String)
 
     @Volatile var busy = false
     @Volatile var message = ""
@@ -80,12 +80,15 @@ object Updater {
             val j = JSONObject(c.inputStream.bufferedReader().readText())
             val body = j.optString("body")
             val code = Regex("versionCode=(\\d+)").find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
+            val sha = Regex("sha256=([0-9a-fA-F]{64})").find(body)?.groupValues?.get(1)?.lowercase()
             val assets = j.getJSONArray("assets")
             for (i in 0 until assets.length()) {
                 val a = assets.getJSONObject(i)
                 if (a.optString("name").endsWith(".apk")) {
-                    val notes = body.lines().filterNot { it.startsWith("versionCode=") }.joinToString("\n").trim()
-                    return Info(code, a.getString("browser_download_url"), a.optLong("size"), notes)
+                    val notes = body.lines()
+                        .filterNot { it.startsWith("versionCode=") || it.startsWith("sha256=") || it.startsWith("size=") }
+                        .joinToString("\n").trim()
+                    return Info(code, a.getString("browser_download_url"), a.optLong("size"), sha, notes)
                 }
             }
             return null
@@ -115,6 +118,8 @@ object Updater {
                 val eng = DualLinkEngine(info.url, dir, links, 4)
                 engine = eng
                 val apk = eng.run()
+                message = "در حال بررسی سلامت فایل…"
+                verify(apk, info)
                 message = "در حال نصب…"
                 install(app, apk)
                 message = "تأیید نصب را در پنجره اندروید بزنید"
@@ -126,6 +131,33 @@ object Updater {
                 busy = false
             }
         }, "update-download").start()
+    }
+
+    /** Size and SHA-256 must match what CI published; otherwise the file is deleted, never installed. */
+    internal fun verify(apk: File, info: Info) {
+        if (info.size > 0 && apk.length() != info.size) {
+            apk.delete()
+            throw IOException("حجم فایل دانلودشده (${apk.length()}) با نسخه منتشرشده (${info.size}) یکی نیست")
+        }
+        val expected = info.sha256 ?: return
+        val actual = sha256(apk)
+        if (actual != expected) {
+            apk.delete()
+            throw IOException("هش فایل دانلودشده با نسخه منتشرشده یکی نیست (فایل خراب است)")
+        }
+    }
+
+    internal fun sha256(f: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        f.inputStream().use { inp ->
+            val buf = ByteArray(1 shl 16)
+            while (true) {
+                val n = inp.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun install(ctx: Context, apk: File) {

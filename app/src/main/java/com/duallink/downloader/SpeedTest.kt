@@ -55,28 +55,37 @@ object SpeedTest {
                 wifiNet = wifi
                 SpeedHistory.clear()
 
-                fun run(title: String, nets: List<Pair<String, Network?>>, upload: Boolean) {
-                    if (stop) return
+                var single = 0.0
+                var both = 0.0
+                fun run(title: String, nets: List<Pair<String, Network?>>, upload: Boolean, conns: Int = CONNS_PER_LINK): Double {
+                    if (stop) return 0.0
                     val usable = nets.filter { it.second != null }
                     if (usable.isEmpty()) {
                         out += "$title: در دسترس نیست"
                         results = out.toList()
-                        return
+                        return 0.0
                     }
                     phase = "$title…"
                     SpeedHistory.label = title
-                    val r = measure(usable.map { it.second!! }, if (upload) upUrl else downUrl, upload)
+                    val r = measure(usable.map { it.second!! }, if (upload) upUrl else downUrl, upload, conns)
                     val parts = usable.mapIndexed { i, (name, _) -> "$name ${SpeedChart.fmtMbps(r[i])}" }
                     val sum = r.sum()
                     out += if (usable.size > 1) "$title: ${SpeedChart.fmtMbps(sum)}  (${parts.joinToString(" + ")})"
                            else "$title: ${SpeedChart.fmtMbps(sum)}"
                     results = out.toList()
+                    return sum
                 }
 
+                // Baseline: what one ordinary connection (e.g. a Chrome download) gets on the main link.
+                single = run("دانلود تک‌اتصال", listOf((if (wifi != null) "وای‌فای" else "دیتا") to (wifi ?: cell)), false, conns = 1)
                 run("دانلود فقط وای‌فای", listOf("وای‌فای" to wifi), false)
                 run("دانلود فقط دیتا", listOf("دیتا" to cell), false)
-                run("دانلود هر دو", listOf("وای‌فای" to wifi, "دیتا" to cell), false)
+                both = run("دانلود هر دو", listOf("وای‌فای" to wifi, "دیتا" to cell), false)
                 run("آپلود هر دو", listOf("وای‌فای" to wifi, "دیتا" to cell), true)
+                if (!stop && single > 0 && both > 0) {
+                    out += String.format("سود تجمیع نسبت به یک اتصال معمولی: %.1f برابر", both / single)
+                    results = out.toList()
+                }
                 phase = if (stop) "متوقف شد" else "تمام شد ✓"
             } catch (e: Exception) {
                 phase = "خطا: ${e.message ?: e.javaClass.simpleName}"
@@ -89,13 +98,13 @@ object SpeedTest {
     }
 
     /** Runs one phase; returns average bytes/s per network (after warm-up). */
-    private fun measure(nets: List<Network>, url: String, upload: Boolean): DoubleArray {
+    private fun measure(nets: List<Network>, url: String, upload: Boolean, conns: Int): DoubleArray {
         val counters = nets.map { AtomicLong(0) }
         val t0 = SystemClock.elapsedRealtime()
         val end = t0 + PHASE_MS
         val threads = ArrayList<Thread>()
         for ((i, net) in nets.withIndex()) {
-            repeat(CONNS_PER_LINK) {
+            repeat(conns) {
                 threads += Thread({
                     while (!stop && SystemClock.elapsedRealtime() < end) {
                         try {

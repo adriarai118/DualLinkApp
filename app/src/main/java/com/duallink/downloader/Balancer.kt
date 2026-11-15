@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /** Live counters for one link in VPN mode. */
-class VpnLink(val name: String, private val provider: () -> Network?) {
+open class VpnLink(val name: String, private val provider: () -> Network?) {
     val down = AtomicLong(0)
     val up = AtomicLong(0)
     val active = AtomicInteger(0)
@@ -29,6 +29,9 @@ class VpnLink(val name: String, private val provider: () -> Network?) {
     internal var swrrCurrent = 0.0
 
     val network: Network? get() = provider()
+
+    /** Whether the link is up. Open so tests can fake a link without an Android Network. */
+    open val available: Boolean get() = network != null
 
     /**
      * Share weight. A link is never weighted below 35% of the best link, so it keeps
@@ -63,7 +66,7 @@ class Balancer(val links: List<VpnLink>, private val countsActive: Boolean = tru
 
     /** Links that currently have a network, best first. */
     fun order(hostKey: String): List<VpnLink> {
-        val up = links.filter { it.network != null }
+        val up = links.filter { it.available }
         if (up.size <= 1) return up
         val now = SystemClock.elapsedRealtime()
         val healthy = up.filter { it.badUntil <= now }.ifEmpty { up }

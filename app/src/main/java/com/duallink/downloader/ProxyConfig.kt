@@ -1,7 +1,5 @@
 package com.duallink.downloader
 
-import android.net.Uri
-import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLDecoder
@@ -68,11 +66,11 @@ object ProxyConfig {
     // ------------------------------------------------------------ protocols
 
     private fun parseVlessTrojan(link: String, proto: String): Parsed {
-        val u = Uri.parse(link)
-        val host = u.host ?: throw IllegalArgumentException("آدرس سرور در لینک نیست")
-        val port = if (u.port > 0) u.port else 443
-        val secret = decode(u.encodedUserInfo ?: throw IllegalArgumentException("UUID/رمز در لینک نیست"))
-        val q = params(u)
+        val u = splitLink(link)
+        val host = u.host.ifEmpty { throw IllegalArgumentException("آدرس سرور در لینک نیست") }
+        val port = u.port ?: 443
+        val secret = decode(u.user.ifEmpty { throw IllegalArgumentException("UUID/رمز در لینک نیست") })
+        val q = u.query
 
         val settings = JSONObject().put("address", host).put("port", port)
         if (proto == "vless") {
@@ -88,7 +86,7 @@ object ProxyConfig {
             .put("protocol", proto)
             .put("settings", settings)
             .put("streamSettings", stream(q, host, defaultSecurity))
-        return Parsed(fragmentName(u, host), proto, host, port, out)
+        return Parsed(decode(u.fragment).ifEmpty { host }, proto, host, port, out)
     }
 
     private fun parseVmess(link: String): Parsed {
@@ -225,13 +223,35 @@ object ProxyConfig {
         return if (LegacyShadowsocks.supports(method)) LegacyShadowsocks(method, st.getString("password")) else null
     }
 
-    private fun params(u: Uri): Map<String, String> {
-        val m = HashMap<String, String>()
-        for (k in u.queryParameterNames) m[k] = u.getQueryParameter(k).orEmpty()
-        return m
-    }
+    /** Pieces of scheme://user@host:port/?query#fragment, parsed leniently (share links are often not strict URIs). */
+    internal class LinkParts(val user: String, val host: String, val port: Int?, val query: Map<String, String>, val fragment: String)
 
-    private fun fragmentName(u: Uri, fallback: String) = u.fragment?.ifEmpty { null } ?: fallback
+    internal fun splitLink(link: String): LinkParts {
+        val rest = link.trim().substringAfter("://")
+        val fragment = rest.substringAfter('#', "")
+        val noFrag = rest.substringBefore('#')
+        val queryStr = noFrag.substringAfter('?', "")
+        val main = noFrag.substringBefore('?').trimEnd('/')
+        val user = main.substringBeforeLast('@', "")
+        val hostPort = main.substringAfterLast('@')
+        val host: String
+        val portStr: String
+        if (hostPort.startsWith("[")) {               // IPv6 literal: [::1]:443
+            host = hostPort.substringAfter('[').substringBefore(']')
+            portStr = hostPort.substringAfter("]:", "")
+        } else {
+            host = hostPort.substringBeforeLast(':')
+            portStr = if (hostPort.contains(':')) hostPort.substringAfterLast(':') else ""
+        }
+        val q = LinkedHashMap<String, String>()
+        if (queryStr.isNotEmpty()) {
+            for (pair in queryStr.split('&')) {
+                if (pair.isEmpty()) continue
+                q[decode(pair.substringBefore('='))] = decode(pair.substringAfter('=', ""))
+            }
+        }
+        return LinkParts(user, host, portStr.toIntOrNull()?.takeIf { it in 1..65535 }, q, fragment)
+    }
 
     private fun decode(s: String): String = try {
         URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
@@ -239,9 +259,5 @@ object ProxyConfig {
         s
     }
 
-    private fun b64(s: String): ByteArray {
-        val clean = s.trim().replace('-', '+').replace('_', '/').replace("\n", "")
-        val padded = clean + "=".repeat((4 - clean.length % 4) % 4)
-        return Base64.decode(padded, Base64.DEFAULT)
-    }
+    private fun b64(s: String): ByteArray = Base64Lenient.decode(s)
 }

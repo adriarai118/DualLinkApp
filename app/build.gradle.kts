@@ -67,6 +67,11 @@ android {
         }
     }
 
+    testOptions {
+        // android.* calls (SystemClock, ...) return defaults instead of throwing in JVM tests.
+        unitTests.isReturnDefaultValues = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -79,4 +84,8 @@ android {
 dependencies {
     // Built in CI from xraybridge/ (Go, gomobile): Xray-core + per-socket link binding.
     implementation(files("libs/xraybridge.aar"))
+
+    testImplementation("junit:junit:4.13.2")
+    // Real org.json for JVM tests (the Android one is only a stub there).
+    testImplementation("org.json:json:20240303")
 }

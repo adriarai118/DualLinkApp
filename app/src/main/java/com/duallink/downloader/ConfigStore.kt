@@ -2,7 +2,6 @@ package com.duallink.downloader
 
 import android.content.Context
 import android.net.Network
-import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -190,18 +189,17 @@ object ConfigStore {
     }
 
     /** Subscriptions are either plain lines or base64 of lines. */
-    private fun decodeSubscription(body: String): String {
+    internal fun decodeSubscription(body: String): String {
         val t = body.trim()
         if (t.contains("://")) return t
         return try {
-            val clean = t.replace("\n", "").replace("\r", "").replace('-', '+').replace('_', '/')
-            String(Base64.decode(clean + "=".repeat((4 - clean.length % 4) % 4), Base64.DEFAULT), Charsets.UTF_8)
+            String(Base64Lenient.decode(t), Charsets.UTF_8)
         } catch (_: Exception) {
             t
         }
     }
 
-    private fun linksIn(text: String): List<String> =
+    internal fun linksIn(text: String): List<String> =
         text.lineSequence().map { it.trim() }.filter {
             it.startsWith("vless://") || it.startsWith("vmess://") || it.startsWith("trojan://") || it.startsWith("ss://")
         }.toList()

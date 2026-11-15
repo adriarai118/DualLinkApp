@@ -13,16 +13,31 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
+/** Opens HTTP connections over one particular link. Separate from Android's Network so the engine can be unit-tested. */
+interface Dialer {
+    fun available(): Boolean
+    fun open(u: URL): HttpURLConnection
+}
+
+class NetworkDialer(private val provider: () -> Network?) : Dialer {
+    override fun available() = provider() != null
+    override fun open(u: URL): HttpURLConnection =
+        (provider() ?: throw IOException("لینک قطع است")).openConnection(u) as HttpURLConnection
+}
+
+/** Thrown when the file on the server changed during the download: restarting is the only safe option. */
+class FileChangedException(msg: String) : IOException(msg)
+
 /** One internet link (Wi-Fi or mobile data) and its live statistics. */
-class LinkStats(val name: String, private val networkProvider: () -> Network?) {
+class LinkStats(val name: String, val dialer: Dialer) {
+    constructor(name: String, networkProvider: () -> Network?) : this(name, NetworkDialer(networkProvider))
+
     val bytes = AtomicLong(0)
     val activeWorkers = AtomicInteger(0)
     val errors = AtomicInteger(0)
     @Volatile var speedBps = 0.0
     @Volatile var lastError: String? = null
     internal var lastBytes = 0L
-
-    val network: Network? get() = networkProvider()
 }
 
 /** A byte range [start..end] of the file. `end` can shrink when another worker steals the tail. */
@@ -63,6 +78,12 @@ class DualLinkEngine(
     val written = AtomicLong(0)
 
     private lateinit var finalUrl: URL
+    /** ETag / Last-Modified from the probe; every piece must come from the same version of the file. */
+    @Volatile var etag: String? = null
+        private set
+    @Volatile var lastModified: String? = null
+        private set
+    @Volatile private var fatal: Exception? = null
     private val lock = Any()
     private val queue = ArrayDeque<Segment>()
     private val inFlight = mutableListOf<Segment>()
@@ -95,7 +116,12 @@ class DualLinkEngine(
         } finally {
             meter.interrupt()
         }
+        fatal?.let { throw it }
         if (cancelled) throw IOException("لغو شد")
+        // Never report success for a short or padded file.
+        if (total > 0 && (written.get() != total || file.length() != total)) {
+            throw IOException("حجم دانلود (${written.get()}) با حجم فایل (${total}) نمی‌خواند")
+        }
         return file
     }
 
@@ -104,9 +130,9 @@ class DualLinkEngine(
     private fun probe() {
         var last: Exception? = null
         for (link in links) {
-            val net = link.network ?: continue
+            if (!link.dialer.available()) continue
             try {
-                probeOn(net)
+                probeOn(link.dialer)
                 return
             } catch (e: Exception) {
                 last = e
@@ -116,7 +142,7 @@ class DualLinkEngine(
         throw IOException("دسترسی به لینک ممکن نشد: ${last?.message ?: "شبکه‌ای وصل نیست"}")
     }
 
-    private fun probeOn(net: Network) {
+    private fun probeOn(net: Dialer) {
         var current = URL(url)
         var redirects = 0
         while (true) {
@@ -132,6 +158,8 @@ class DualLinkEngine(
                     continue
                 }
                 finalUrl = current
+                etag = c.getHeaderField("ETag")
+                lastModified = c.getHeaderField("Last-Modified")
                 mime = c.contentType?.substringBefore(';')?.trim()?.takeIf { it.isNotEmpty() }
                 fileName = fileNameFrom(c.getHeaderField("Content-Disposition"), current)
                 when (code) {
@@ -196,8 +224,7 @@ class DualLinkEngine(
         var waitedForNetwork = 0
         try {
             while (!cancelled) {
-                val net = link.network
-                if (net == null) {
+                if (!link.dialer.available()) {
                     // The link dropped; wait for it to come back for a while.
                     if (isFinished() || ++waitedForNetwork > NETWORK_WAIT_SECONDS) return
                     Thread.sleep(1000)
@@ -212,11 +239,16 @@ class DualLinkEngine(
                     continue
                 }
                 try {
-                    fetch(net, link, seg, ch, buf)
+                    fetch(link.dialer, link, seg, ch, buf)
                     release(seg, requeue = false)
                     fails = 0
                 } catch (e: Exception) {
                     release(seg, requeue = true)
+                    if (e is FileChangedException) {
+                        fatal = e
+                        cancel()
+                        return
+                    }
                     if (cancelled) return
                     link.errors.incrementAndGet()
                     link.lastError = e.message ?: e.javaClass.simpleName
@@ -263,16 +295,28 @@ class DualLinkEngine(
         }
     }
 
-    private fun fetch(net: Network, link: LinkStats, seg: Segment, ch: FileChannel, buf: ByteArray) {
+    private fun fetch(net: Dialer, link: LinkStats, seg: Segment, ch: FileChannel, buf: ByteArray) {
         val c = open(net, finalUrl)
         c.setRequestProperty("Range", "bytes=${seg.pos}-${seg.end}")
+        // If-Range: the server sends the whole (new) file instead of a piece if it changed.
+        val strongEtag = etag?.takeIf { !it.startsWith("W/") }
+        (strongEtag ?: lastModified)?.let { c.setRequestProperty("If-Range", it) }
         openConns.add(c)
         try {
             val code = c.responseCode
+            if (code == 200 && (strongEtag != null || lastModified != null)) {
+                throw FileChangedException("فایل روی سرور وسط دانلود عوض شد")
+            }
             if (code != 206) throw IOException("HTTP $code (انتظار 206)")
+            val respEtag = c.getHeaderField("ETag")
+            if (etag != null && respEtag != null && respEtag != etag) {
+                throw FileChangedException("فایل روی سرور وسط دانلود عوض شد (ETag)")
+            }
             val cr = c.getHeaderField("Content-Range") ?: throw IOException("Content-Range ندارد")
             val start = cr.substringAfter("bytes", "").trim().substringBefore('-').trim().toLongOrNull()
             if (start != seg.pos) throw IOException("بازه اشتباه از سرور: $cr")
+            val size = cr.substringAfter('/', "").trim().toLongOrNull()
+            if (size != null && size != total) throw FileChangedException("حجم فایل روی سرور عوض شد")
 
             c.inputStream.use { input ->
                 while (!cancelled) {
@@ -301,8 +345,8 @@ class DualLinkEngine(
     private fun singleStream(file: File) {
         var last: Exception? = null
         for (link in links) {
-            val net = link.network ?: continue
-            val c = open(net, finalUrl)
+            if (!link.dialer.available()) continue
+            val c = open(link.dialer, finalUrl)
             openConns.add(c)
             try {
                 written.set(0)
@@ -359,8 +403,8 @@ class DualLinkEngine(
         }
     }
 
-    private fun open(net: Network, u: URL): HttpURLConnection {
-        val c = net.openConnection(u) as HttpURLConnection
+    private fun open(net: Dialer, u: URL): HttpURLConnection {
+        val c = net.open(u)
         c.connectTimeout = 15_000
         c.readTimeout = 20_000
         c.instanceFollowRedirects = true
