@@ -7,8 +7,8 @@ import org.junit.Test
 class BalancerTest {
 
     /** A link without an Android Network behind it. */
-    private class FakeLink(name: String, var up: Boolean = true) : VpnLink(name, { null }) {
-        override val available: Boolean get() = up
+    private class FakeLink(name: String, var isUp: Boolean = true) : VpnLink(name, { null }) {
+        override val available: Boolean get() = isUp
     }
 
     private fun pickMany(b: Balancer, n: Int, holdConnections: Boolean): Map<String, Int> {
@@ -38,10 +38,10 @@ class BalancerTest {
     }
 
     @Test fun downLinkIsSkipped() {
-        val cell = FakeLink("cell", up = false)
+        val cell = FakeLink("cell", isUp = false)
         val b = Balancer(listOf(FakeLink("wifi"), cell))
         assertEquals(listOf("wifi"), b.order("x").map { it.name })
-        cell.up = true
+        cell.isUp = true
         assertEquals(2, b.order("x").size)
     }
 

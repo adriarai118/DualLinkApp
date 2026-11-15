@@ -1,7 +1,5 @@
 package com.duallink.downloader
 
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -12,7 +10,10 @@ import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.net.HttpURLConnection
-import java.net.InetSocketAddress
+import java.io.OutputStream
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.net.URL
 import java.nio.file.Files
 import java.util.concurrent.Executors
@@ -25,7 +26,8 @@ import kotlin.random.Random
  */
 class DualLinkEngineTest {
 
-    private lateinit var server: HttpServer
+    private lateinit var server: ServerSocket
+    private val pool = Executors.newCachedThreadPool()
     private lateinit var dir: File
 
     // Server behaviour, set per test
@@ -45,29 +47,68 @@ class DualLinkEngineTest {
 
     @Before fun setUp() {
         dir = Files.createTempDirectory("dl").toFile()
-        server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 64)
-        server.executor = Executors.newCachedThreadPool()
-        server.createContext("/file.bin") { ex -> handle(ex) }
-        server.start()
+        server = ServerSocket(0, 64, InetAddress.getByName("127.0.0.1"))
+        pool.execute {
+            while (!server.isClosed) {
+                val s = try { server.accept() } catch (_: Exception) { break }
+                pool.execute { s.use { handle(it) } }
+            }
+        }
     }
 
     @After fun tearDown() {
-        server.stop(0)
+        server.close()
+        pool.shutdownNow()
         dir.deleteRecursively()
     }
 
-    private fun handle(ex: HttpExchange) {
+    /** Minimal HTTP/1.1: one request per connection, then close. */
+    private class Req(val headers: Map<String, String>)
+
+    private fun readRequest(s: Socket): Req {
+        val inp = s.getInputStream()
+        val lines = ArrayList<String>()
+        val sb = StringBuilder()
+        while (true) {
+            val b = inp.read()
+            if (b < 0) break
+            if (b == '\n'.code) {
+                val line = sb.toString().trimEnd('\r')
+                sb.setLength(0)
+                if (line.isEmpty()) break
+                lines += line
+            } else {
+                sb.append(b.toChar())
+            }
+        }
+        val h = HashMap<String, String>()
+        for (l in lines.drop(1)) h[l.substringBefore(':').trim().lowercase()] = l.substringAfter(':').trim()
+        return Req(h)
+    }
+
+    private fun writeHead(out: OutputStream, status: String, headers: Map<String, String>) {
+        val sb = StringBuilder("HTTP/1.1 $status\r\n")
+        headers.forEach { (k, v) -> sb.append(k).append(": ").append(v).append("\r\n") }
+        sb.append("Connection: close\r\n\r\n")
+        out.write(sb.toString().toByteArray())
+    }
+
+    private fun handle(sock: Socket) {
         try {
-            val range = ex.requestHeaders.getFirst("Range")
-            val ifRange = ex.requestHeaders.getFirst("If-Range")
+            val req = readRequest(sock)
+            val out = sock.getOutputStream()
+            val range = req.headers["range"]
+            val ifRange = req.headers["if-range"]
             var body = content
-            ex.responseHeaders.add("ETag", etag)
-            ex.responseHeaders.add("Content-Type", "application/octet-stream")
             val m = range?.let { Regex("bytes=(\\d+)-(\\d+)").find(it) }
             val partial = supportRange && m != null && (ifRange == null || ifRange == etag)
             if (!partial) {
-                ex.sendResponseHeaders(200, body.size.toLong())
-                ex.responseBody.use { it.write(body) }
+                writeHead(out, "200 OK", mapOf(
+                    "ETag" to etag, "Content-Type" to "application/octet-stream",
+                    "Content-Length" to body.size.toString(),
+                ))
+                out.write(body)
+                out.flush()
                 return
             }
             val n = rangeRequests.incrementAndGet()
@@ -76,28 +117,28 @@ class DualLinkEngineTest {
                 content = Random(2).nextBytes(content.size)
                 etag = "\"v2\""
                 body = content
-                ex.responseHeaders.set("ETag", etag)
             }
             val start = m!!.groupValues[1].toInt()
             val end = minOf(m.groupValues[2].toInt(), body.size - 1)
             val len = end - start + 1
-            ex.responseHeaders.add("Content-Range", "bytes $start-$end/${body.size}")
-            ex.sendResponseHeaders(206, len.toLong())
-            ex.responseBody.use { out ->
-                if (len > 1 && truncated.get() < truncateFirst && truncated.incrementAndGet() <= truncateFirst) {
-                    out.write(body, start, len / 2) // then drop the connection
-                    out.flush()
-                    throw RuntimeException("simulated cut")
-                }
-                out.write(body, start, len)
+            writeHead(out, "206 Partial Content", mapOf(
+                "ETag" to etag, "Content-Type" to "application/octet-stream",
+                "Content-Range" to "bytes $start-$end/${body.size}",
+                "Content-Length" to len.toString(),
+            ))
+            if (len > 1 && truncated.get() < truncateFirst && truncated.incrementAndGet() <= truncateFirst) {
+                out.write(body, start, len / 2) // then drop the connection
+                out.flush()
+                return
             }
+            out.write(body, start, len)
+            out.flush()
         } catch (_: Exception) {
-            ex.close()
         }
     }
 
     private fun engine(links: Int = 2, threads: Int = 3) = DualLinkEngine(
-        "http://127.0.0.1:${server.address.port}/file.bin",
+        "http://127.0.0.1:${server.localPort}/file.bin",
         dir,
         List(links) { LinkStats("link$it", direct) },
         threads,
@@ -153,7 +194,7 @@ class DualLinkEngineTest {
             override fun open(u: URL): HttpURLConnection = throw AssertionError("must not dial a down link")
         }
         val e = DualLinkEngine(
-            "http://127.0.0.1:${server.address.port}/file.bin", dir,
+            "http://127.0.0.1:${server.localPort}/file.bin", dir,
             listOf(LinkStats("up", direct), LinkStats("down", down)), 2,
         )
         assertArrayEquals(content, e.run().readBytes())
