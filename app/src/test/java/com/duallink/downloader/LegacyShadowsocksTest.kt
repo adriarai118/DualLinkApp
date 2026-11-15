@@ -46,6 +46,26 @@ class LegacyShadowsocksTest {
         assertArrayEquals(plain, readAll(ss.Reader(ByteArrayInputStream(stream))))
     }
 
+    @Test fun aesCfbDecryptsServerStream() {
+        val ss = LegacyShadowsocks("aes-256-cfb", password)
+        val stream = hex("000102030405060708090a0b0c0d0e0f8f8df4b08a58b7580f6ea63a7ee984fd0cf220be8cad84b63a84da9cbaa96f5010079d7c")
+        assertArrayEquals(plain, readAll(ss.Reader(ByteArrayInputStream(stream))))
+    }
+
+    /** Regression: a short message must be sent at once, not held back until a full AES block. */
+    @Test fun shortMessagesAreNotBuffered() {
+        for (m in listOf("rc4-md5", "aes-256-cfb", "aes-128-ctr")) {
+            val ss = LegacyShadowsocks(m, password)
+            val wire = ByteArrayOutputStream()
+            ss.Writer(wire).write("PING!".toByteArray(), 0, 5)
+            assertEquals(m, 16 + 5, wire.size())
+            val r = ss.Reader(ByteArrayInputStream(wire.toByteArray()))
+            val buf = ByteArray(64)
+            assertEquals(m, 5, r.read(buf))
+            assertEquals(m, "PING!", String(buf, 0, 5))
+        }
+    }
+
     @Test fun aesCfbDecryptsUdpPacket() {
         val ss = LegacyShadowsocks("aes-256-cfb", password)
         val pkt = hex("000102030405060708090a0b0c0d0e0fc6d8a2e3a169ac0d412fbb7a3fdfa39ff385")
